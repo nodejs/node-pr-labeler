@@ -21,6 +21,7 @@
   "dependencies": {
     "@actions/core": "^1.2.6",
     "@actions/github": "^4.0.0",
-    "aigle": "^1.14.1"
+    "aigle": "^1.14.1",
+    "js-yaml": "^4.0.0"
   }
 }
