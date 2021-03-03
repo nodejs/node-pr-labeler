@@ -1,0 +1,26 @@
+{
+  "name": "node-pr-labeler",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "STATUS=0; tap test/**/*.test.js || STATUS=$?; standard || STATUS=$?; exit $STATUS"
+  },
+  "keywords": [],
+  "engines": {
+    "node": ">= 14.0.0"
+  },
+  "private": true,
+  "license": "MIT",
+  "devDependencies": {
+    "lolex": "^6.0.0",
+    "nock": "^13.0.9",
+    "standard": "^16.0.3",
+    "tap": "^14.11.0"
+  },
+  "dependencies": {
+    "@actions/core": "^1.2.6",
+    "@actions/github": "^4.0.0",
+    "aigle": "^1.14.1"
+  }
+}
