@@ -150,3 +150,44 @@ exlusiveLabels:
   /^benchmark\/([^/]+)\//: benchmark, $1
 
   /^benchmark\//: benchmark
+
+allJsSubSystems:
+  - assert
+  - async_hooks
+  - buffer
+  - child_process
+  - cluster
+  - console
+  - crypto
+  - debugger
+  - dgram
+  - dns
+  - domain
+  - events
+  - esm
+  - fs
+  - http
+  - https
+  - http2
+  - module
+  - net
+  - os
+  - path
+  - process
+  - querystring
+  - quic
+  - readline
+  - repl
+  - report
+  - stream
+  - string_decoder
+  - timers
+  - tls
+  - tty
+  - url
+  - util
+  - v8
+  - vm
+  - wasi
+  - worker
+  - zlib
