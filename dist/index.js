@@ -48,7 +48,7 @@ async function fetchConfig (
   repo,
   filepath
 ) {
-  const response = await client.repos.getContents({
+  const response = await client.repos.getContent({
     owner,
     repo,
     path: filepath,
@@ -91,7 +91,7 @@ async function resolveLabelsThenUpdatePr (options) {
   }))
   core.debug('Fetching PR files for labelling')
 
-  const resolvedLabels = resolveLabels(filepathsChanged, options.baseBranch)
+  const resolvedLabels = resolveLabels(filepathsChanged, options.baseBranch, options.configAsString)
 
   return fetchExistingThenUpdatePr(options, resolvedLabels)
 }

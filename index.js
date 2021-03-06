@@ -40,7 +40,7 @@ async function fetchConfig (
   repo,
   filepath
 ) {
-  const response = await client.repos.getContents({
+  const response = await client.repos.getContent({
     owner,
     repo,
     path: filepath,
