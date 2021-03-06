@@ -3,52 +3,11 @@
 process.env['INPUT_REPO-TOKEN'] = 'phony-repo-token-for-tests'
 
 const tap = require('tap')
-const lolex = require('lolex')
 const nock = require('nock')
 
 const nodeRepo = require('../lib/node-repo')
 
 const readFixture = require('./read-fixture')
-
-tap.test('fetchExistingLabels(): caches existing repository labels', async (t) => {
-  const owner = 'nodejs'
-  const repo = 'node1'
-  // Test passes if nock is only called once, no other checks to run
-  const scope = nock('https://api.github.com')
-    .filteringPath(ignoreQueryParams)
-    .get(`/repos/${owner}/${repo}/labels`)
-    .once() // should only be called once
-    .reply(200, [])
-
-  await nodeRepo._fetchExistingLabels({ owner, repo })
-  await nodeRepo._fetchExistingLabels({ owner, repo })
-  scope.done()
-})
-
-tap.test('fetchExistingLabels(): cache expires after one hour', async (t) => {
-  const owner = 'nodejs'
-  const repo = 'node2'
-  const clock = lolex.install()
-
-  // Test passes if nock is only called once, no other checks to run
-  const scope = nock('https://api.github.com')
-    .filteringPath(ignoreQueryParams)
-    .get(`/repos/${owner}/${repo}/labels`)
-    .twice() // should be called twice
-    .reply(200, [])
-
-  t.tearDown(() => {
-    clock.uninstall()
-  })
-
-  await nodeRepo._fetchExistingLabels({ owner, repo })
-
-  // fetch labels again after 1 hour and 1 minute
-  clock.tick(1000 * 60 * 61)
-
-  await nodeRepo._fetchExistingLabels({ owner, repo })
-  scope.done()
-})
 
 tap.test('fetchExistingLabels(): yields an array of existing label names', async (t) => {
   const labelsFixture = readFixture('repo-labels.json')
