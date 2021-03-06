@@ -11,5 +11,5 @@ inputs:
     required: false
     default: '.github/pr-labeler.yml'
 runs:
-  using: 'node14'
+  using: 'node12'
   main: 'dist/index.js'
