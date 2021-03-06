@@ -1,11 +1,11 @@
 'use strict'
 
-process.env['INPUT_REPO-TOKEN'] = 'phony-repo-token-for-tests'
-
 const tap = require('tap')
 const nock = require('nock')
+const github = require('@actions/github')
 
 const nodeRepo = require('../lib/node-repo')
+const client = github.getOctokit('phony-repo-token-for-tests')
 
 const readFixture = require('./read-fixture')
 
@@ -21,7 +21,7 @@ tap.test('fetchExistingLabels(): yields an array of existing label names', async
 
   t.plan(1)
 
-  const existingLabels = await nodeRepo._fetchExistingLabels({ owner, repo })
+  const existingLabels = await nodeRepo._fetchExistingLabels({ owner, repo, client })
   t.ok(existingLabels.includes('cluster'))
   scope.done()
 })
@@ -47,7 +47,7 @@ tap.test('fetchExistingLabels(): can retrieve more than 100 labels', async (t) =
 
   t.plan(2)
 
-  const existingLabels = await nodeRepo._fetchExistingLabels({ owner, repo })
+  const existingLabels = await nodeRepo._fetchExistingLabels({ owner, repo, client })
   t.ok(existingLabels.includes('cluster'))
   t.ok(existingLabels.includes('windows'))
   firstPageScope.done()
