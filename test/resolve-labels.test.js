@@ -6,7 +6,7 @@ const tap = require('tap')
 
 const actualResolveLabels = require('../lib/resolve-labels')
 
-const config = fs.readFileSync(path.join(__dirname, '../.github/pr-labeler.yml'), 'utf8')
+const config = fs.readFileSync(path.join(__dirname, '../.github/pr-labels.yml'), 'utf8')
 const defaultBaseBranch = 'master'
 const resolveLabels = (filepathsChanged, baseBranch) => actualResolveLabels(filepathsChanged, baseBranch || defaultBaseBranch, config)
 
