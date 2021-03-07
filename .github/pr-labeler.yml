@@ -1,3 +1,8 @@
+## This configuration file acts as an example and used in the test suite.
+## git repositories using this GitHub Action, will not be using this particular
+## configuration file directly, but provide a similar file, located in those
+## repositories themselves.
+
 ## Order of entries in this map *does* matter for the resolved labels
 ## earlier entries override later entries
 subSystemLabels:
