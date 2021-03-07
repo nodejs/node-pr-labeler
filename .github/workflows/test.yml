@@ -18,3 +18,40 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - run: npm ci
       - run: npm test
+
+  # Rudimentary release process to avoid manual work of bundling & tagging
+  # whenever changes are made that effects the `dist/index.js` bundle.
+  release:
+    needs: tests
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    env:
+      TAG: v1
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Setup Node.js
+        uses: actions/setup-node@v1
+        with:
+          node-version: 14.x
+
+      - name: npm install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Check if dist/ has changed after build
+        id: changedTest
+        run: git diff --quiet HEAD -- dist/ || echo "::set-output name=hasChanged::true"
+
+      - name: Commit and update tag
+        if: ${{ steps.changedTest.outputs.hasChanged == 'true' }}
+        run: |
+          git config --global user.name 'via-github-actions'
+          git config --global user.email 'github-actions@noreply.github.com'
+          git add dist/
+          git commit -m "🚀 Update dist/ and $TAG-tag"
+          git tag -f $TAG
+          git push origin :refs/tags/$TAG
+          git push origin main --tags
