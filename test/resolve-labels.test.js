@@ -1,14 +1,8 @@
 'use strict'
 
-const fs = require('fs')
-const path = require('path')
 const tap = require('tap')
 
-const actualResolveLabels = require('../lib/resolve-labels')
-
-const config = fs.readFileSync(path.join(__dirname, '../.github/pr-labels.yml'), 'utf8')
-const defaultBaseBranch = 'master'
-const resolveLabels = (filepathsChanged, baseBranch) => actualResolveLabels(filepathsChanged, baseBranch || defaultBaseBranch, config)
+const { resolveLabels } = require('./_resolve-labels-helper')
 
 tap.test('no labels: when ./test/ and ./doc/ files has been changed', (t) => {
   const labels = resolveLabels([
