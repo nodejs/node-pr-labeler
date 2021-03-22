@@ -44,6 +44,7 @@ tap.test('label: lib oddities', (t) => {
   const labels = resolveLabels(libFiles)
 
   t.same(labels, [
+    'needs-ci',       // lib/
     'debugger',       // _debug_agent
     'http',           // _http_*
     'timers',         // linklist
@@ -68,6 +69,7 @@ tap.test('label: lib internals oddities duplicates', (t) => {
   const labels = resolveLabels(libFiles)
 
   t.same(labels, [
+    'needs-ci',  // lib/
     'lib / src', // bootstrap_node
     'timers',    // linkedlist
     'stream'     // internal/streams/
@@ -116,6 +118,7 @@ tap.test('label: lib/ paths', (t) => {
     const expected = /lib\/(_)?(\w+)\.js/.exec(filepath)[2]
     const labels = resolveLabels([filepath])
 
+    t.same(labels.shift(), 'needs-ci')
     t.same(labels, [expected], `${filepath} got "${expected}" label`)
   })
 
@@ -138,6 +141,7 @@ tap.test('label: lib/internals/ paths', (t) => {
     const expected = /lib\/internal\/(\w+)\.js/.exec(filepath)[1]
     const labels = resolveLabels([filepath])
 
+    t.same(labels.shift(), 'needs-ci')
     t.same(labels, [expected], `${filepath} got "${expected}" label`)
   })
 
@@ -181,7 +185,7 @@ tap.test('label: appropriate labels for files in internal subdirectories', (t) =
     'lib/internal/process/next_tick.js'
   ])
 
-  t.same(labels, ['cluster', 'process'])
+  t.same(labels, ['needs-ci', 'cluster', 'process'])
 
   t.end()
 })

@@ -40,10 +40,10 @@ subSystemLabels:
   /^src\/node_bob*/: c++, quic, dont-land-on-v14.x, dont-land-on-v12.x
 
   # don't label python files as c++
-  /^src\/.+\.py$/: lib / src
+  /^src\/.+\.py$/: lib / src, needs-ci
 
   # properly label changes to v8 inspector integration-related files
-  /^src\/inspector_/: c++, inspector
+  /^src\/inspector_/: c++, inspector, needs-ci
 
   # don't want to label it a c++ update when we're "only" bumping the Node.js version
   /^src\/(?!node_version\.h)/: c++
@@ -54,22 +54,24 @@ subSystemLabels:
   # things that edit top-level .md files are always a doc change
   /^\w+\.md$/: doc
   # different variants of *Makefile and build files
-  /^(tools\/)?(Makefile|BSDmakefile|create_android_makefiles|\.travis\.yml)$/: build
-  /^tools\/(install\.py|genv8constants\.py|getnodeversion\.py|js2c\.py|utils\.py|configure\.d\/.*)$/: build
-  /^vcbuild\.bat$/: build, windows
-  /^(android-)?configure|node\.gyp|common\.gypi$/: build
+  /^(tools\/)?(Makefile|BSDmakefile|create_android_makefiles|\.travis\.yml)$/: build, needs-ci
+  /^tools\/(install\.py|genv8constants\.py|getnodeversion\.py|js2c\.py|utils\.py|configure\.d\/.*)$/: build, needs-ci
+  /^vcbuild\.bat$/: build, windows, needs-ci
+  /^(android-)?configure|node\.gyp|common\.gypi$/: build, needs-ci
   # more specific tools
-  /^tools\/gyp/: tools, build
+  /^tools\/gyp/: tools, build, needs-ci
   /^tools\/doc\//: tools, doc
-  /^tools\/icu\//: tools, intl
+  /^tools\/icu\//: tools, intl, needs-ci
   /^tools\/(?:osx-pkg\.pmdoc|pkgsrc)\//: tools, macos, install
   /^tools\/(?:(?:mac)?osx-)/: tools, macos
   /^tools\/test-npm/: tools, test, npm
   /^tools\/test/: tools, test
   /^tools\/(?:certdata|mkssldef|mk-ca-bundle)/: tools, openssl, tls
-  /^tools\/msvs\//: tools, windows, install
-  /^tools\/[^/]+\.bat$/: tools, windows
-  /^tools\/make-v8/: tools, V8 Engine
+  /^tools\/msvs\//: tools, windows, install, needs-ci
+  /^tools\/[^/]+\.bat$/: tools, windows, needs-ci
+  /^tools\/make-v8/: tools, V8 Engine, needs-ci
+  /^tools\/(code_cache|snapshot|v8_gypfiles)/: needs-ci,
+  /^tools\/build-addons.js/: needs-ci,
   # all other tool changes should be marked as such
   /^tools\//: tools
   /^\.eslint|\.remark|\.editorconfig/: tools
