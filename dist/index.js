@@ -192,6 +192,8 @@ exports._fetchExistingLabels = fetchExistingLabels
 
 const yaml = __nccwpck_require__(1917)
 
+const ciNeededFolderRx = /^(deps|lib|src|test)\//
+
 function parseRegexToLabelsConfig (objectFromYaml) {
   return Object.entries(objectFromYaml)
     .map(([regexAsString, labelsAsString]) => {
@@ -276,6 +278,10 @@ function matchSubSystemsByRegex (rxLabelsMap, filepathsChanged) {
 
   // by putting matched labels into a map, we avoid duplicate labels
   const labelsMap = filepathsChanged.reduce((map, filepath) => {
+    if (ciNeededFolderRx.test(filepath) && !map['needs-ci']) {
+      map['needs-ci'] = true
+    }
+
     const mappedSubSystems = mappedSubSystemsForFile(rxLabelsMap, filepath)
 
     if (!mappedSubSystems) {
@@ -288,8 +294,8 @@ function matchSubSystemsByRegex (rxLabelsMap, filepathsChanged) {
       if (hasLibOrSrcChanges(filepathsChanged)) {
         if (labelCount.length >= labelsCountLimit) {
           for (const label of labelCount) {
-            // don't delete the c++ label as we always want that if it has matched
-            if (label !== 'c++') delete map[label]
+            // don't delete the `c++` or `needs-ci` labels as we always want those if they have matched
+            if (label !== 'c++' && label !== 'needs-ci') delete map[label]
           }
           map['lib / src'] = true
           // short-circuit
