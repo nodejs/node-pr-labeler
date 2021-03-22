@@ -44,15 +44,15 @@ tap.test('label: lib oddities', (t) => {
   const labels = resolveLabels(libFiles)
 
   t.same(labels, [
-    'debugger',       // _debug_agent OK
-    'http',           // _http_* ok
-    'timers',         // linklist ok
-    'stream',         // _stream_* ok
-    'tls',            // _tls_* ok
-    'lib / src',      // constants ok
-    'process',        // internal/process/ ok
-    'net',            // socket_list ok
-    'tools'           // v8_prof_* ok
+    'debugger',       // _debug_agent
+    'http',           // _http_*
+    'timers',         // linklist
+    'stream',         // _stream_*
+    'tls',            // _tls_*
+    'lib / src',      // constants
+    'process',        // internal/process/
+    'net',            // socket_list
+    'tools'           // v8_prof_*
   ])
 
   t.end()
