@@ -44,7 +44,7 @@ async function fetchConfig (
     owner,
     repo,
     path: filepath,
-    ref: github.context.sha
+    ref: 'master'
   })
 
   return Buffer.from(response.data.content, response.data.encoding).toString()
