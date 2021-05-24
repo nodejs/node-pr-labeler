@@ -40,11 +40,13 @@ async function fetchConfig (
   repo,
   filepath
 ) {
+  core.info(JSON.stringify(github.event, null, 2))
+
   const response = await client.repos.getContent({
     owner,
     repo,
     path: filepath,
-    ref: 'master'
+    ref: 'master' // github.event.pull_request.base.repo.default_branch
   })
 
   return Buffer.from(response.data.content, response.data.encoding).toString()
