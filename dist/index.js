@@ -52,7 +52,7 @@ async function fetchConfig (
     owner,
     repo,
     path: filepath,
-    ref: 'master'
+    ref: github.context.payload.pull_request.base.repo.default_branch
   })
 
   return Buffer.from(response.data.content, response.data.encoding).toString()
