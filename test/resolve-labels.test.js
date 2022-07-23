@@ -427,12 +427,12 @@ tap.test('label: version labels (new, staging)', (t) => {
   t.end()
 })
 
-tap.test('label: no version labels (master)', (t) => {
+tap.test('label: no version labels (main)', (t) => {
   const labels = resolveLabels([
     'deps/v8/include/v8-version.h',
     'deps/v8/src/crankshaft/hydrogen.cc',
     'deps/v8/test/mjsunit/regress/regress-5033.js'
-  ], 'master')
+  ], 'main')
 
   t.same(labels, ['needs-ci', 'V8 Engine'])
 
