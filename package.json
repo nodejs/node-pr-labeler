@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build": "ncc build index.js",
-    "test": "STATUS=0; tap test/**/*.test.js || STATUS=$?; standard || STATUS=$?; exit $STATUS"
+    "test": "STATUS=0; tap test/**/*.test.js --no-check-coverage || STATUS=$?; standard || STATUS=$?; exit $STATUS"
   },
   "keywords": [],
   "engines": {
@@ -17,7 +17,7 @@
     "@vercel/ncc": "^0.27.0",
     "nock": "^13.0.9",
     "standard": "^16.0.3",
-    "tap": "^14.11.0"
+    "tap": "^16.0.0"
   },
   "dependencies": {
     "@actions/core": "^1.2.6",
