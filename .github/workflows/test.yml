@@ -4,20 +4,10 @@ on: [push, pull_request]
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        node-version: [14.x, 15.x]
-
-    steps:
-      - uses: actions/checkout@v2
-      - name: Setup Node.js
-        uses: actions/setup-node@v2.1.2
-        with:
-          node-version: ${{ matrix.node-version }}
-      - run: npm ci
-      - run: npm test
+    uses: pkgjs/action/.github/workflows/node-test.yaml@v0
+    with:
+      runs-on: ubuntu-latest
+      upgrade-policy: all
 
   # Rudimentary release process to avoid manual work of bundling & tagging
   # whenever changes are made that effects the `dist/index.js` bundle.
