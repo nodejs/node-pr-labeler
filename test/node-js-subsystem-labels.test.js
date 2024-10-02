@@ -1,11 +1,11 @@
 /* eslint-disable no-multi-spaces */
 'use strict'
 
-const tap = require('tap')
+const { test } = require('node:test')
 
 const { resolveLabels } = require('./_resolve-labels-helper')
 
-tap.test('label: lib oddities', (t) => {
+test('label: lib oddities', (t) => {
   process.env.MAX_LABELS_LIMIT = 1000
 
   t.afterEach(() => {
@@ -20,7 +20,6 @@ tap.test('label: lib oddities', (t) => {
     'lib/_http_incoming.js',
     'lib/_http_outgoing.js',
     'lib/_http_server.js',
-    'lib/_linklist.js',
     'lib/_stream_duplex.js',
     'lib/_stream_passthrough.js',
     'lib/_stream_readable.js',
@@ -33,9 +32,7 @@ tap.test('label: lib oddities', (t) => {
     'lib/constants.js',
     'lib/punycode.js', // ignored
     'lib/sys.js', // ignored
-    'lib/internal/freelist.js', // ignored
     'lib/internal/process',
-    'lib/internal/readme.md', // ignored
     'lib/internal/socket_list.js',
     'lib/internal/v8_prof_polyfill.js',
     'lib/internal/v8_prof_processor.js'
@@ -43,11 +40,10 @@ tap.test('label: lib oddities', (t) => {
 
   const labels = resolveLabels(libFiles)
 
-  t.same(labels, [
+  t.assert.deepStrictEqual(labels, [
     'needs-ci',       // lib/
-    'debugger',       // _debug_agent
+    'debug',       // _debug_agent
     'http',           // _http_*
-    'timers',         // linklist
     'stream',         // _stream_*
     'tls',            // _tls_*
     'lib / src',      // constants
@@ -55,11 +51,9 @@ tap.test('label: lib oddities', (t) => {
     'net',            // socket_list
     'tools'           // v8_prof_*
   ])
-
-  t.end()
 })
 
-tap.test('label: lib internals oddities duplicates', (t) => {
+test('label: lib internals oddities duplicates', (t) => {
   const libFiles = [
     'lib/internal/bootstrap_node.js',
     'lib/internal/linkedlist.js',
@@ -68,19 +62,16 @@ tap.test('label: lib internals oddities duplicates', (t) => {
 
   const labels = resolveLabels(libFiles)
 
-  t.same(labels, [
+  t.assert.deepStrictEqual(labels, [
     'needs-ci',  // lib/
     'lib / src', // bootstrap_node
     'timers',    // linkedlist
-    'stream'     // internal/streams/
+    'streams'     // internal/streams/
   ])
-
-  t.end()
 })
 
-tap.test('label: lib/ paths', (t) => {
+test('label: lib/ paths', (t) => {
   const libFiles = [
-    'lib/_debugger.js',
     'lib/assert.js',
     'lib/buffer.js',
     'lib/child_process.js',
@@ -118,14 +109,12 @@ tap.test('label: lib/ paths', (t) => {
     const expected = /lib\/(_)?(\w+)\.js/.exec(filepath)[2]
     const labels = resolveLabels([filepath])
 
-    t.same(labels.shift(), 'needs-ci')
-    t.same(labels, [expected], `${filepath} got "${expected}" label`)
+    t.assert.strictEqual(labels.shift(), 'needs-ci')
+    t.assert.deepStrictEqual(labels, [expected], `${filepath} got "${expected}" label`)
   })
-
-  t.end()
 })
 
-tap.test('label: lib/internals/ paths', (t) => {
+test('label: lib/internals/ paths', (t) => {
   const libFiles = [
     'lib/internal/child_process.js',
     'lib/internal/cluster.js',
@@ -141,51 +130,41 @@ tap.test('label: lib/internals/ paths', (t) => {
     const expected = /lib\/internal\/(\w+)\.js/.exec(filepath)[1]
     const labels = resolveLabels([filepath])
 
-    t.same(labels.shift(), 'needs-ci')
-    t.same(labels, [expected], `${filepath} got "${expected}" label`)
+    t.assert.strictEqual(labels.shift(), 'needs-ci')
+    t.assert.deepStrictEqual(labels, [expected], `${filepath} got "${expected}" label`)
   })
-
-  t.end()
 })
 
-tap.test('label: add subsystem when ./doc/api/<subsystem>.md has been changed', (t) => {
+test('label: add subsystem when ./doc/api/<subsystem>.md has been changed', (t) => {
   const labels = resolveLabels([
     'doc/api/fs.md'
   ])
 
-  t.same(labels, ['doc', 'fs'])
-
-  t.end()
+  t.assert.deepStrictEqual(labels, ['doc', 'fs'])
 })
 
-tap.test('label: only "doc" with multiple API doc files changed', (t) => {
+test('label: only "doc" with multiple API doc files changed', (t) => {
   const labels = resolveLabels([
     'doc/api/fs.md',
     'doc/api/stream.md'
   ])
 
-  t.same(labels, ['doc'])
-
-  t.end()
+  t.assert.deepStrictEqual(labels, ['doc'])
 })
 
-tap.test('label: "doc,module" when doc/api/modules.md was changed', (t) => {
+test('label: "doc,module" when doc/api/modules.md was changed', (t) => {
   const labels = resolveLabels([
     'doc/api/modules.md'
   ])
 
-  t.same(labels, ['doc', 'module'])
-
-  t.end()
+  t.assert.deepStrictEqual(labels, ['doc', 'module'])
 })
 
-tap.test('label: appropriate labels for files in internal subdirectories', (t) => {
+test('label: appropriate labels for files in internal subdirectories', (t) => {
   const labels = resolveLabels([
     'lib/internal/cluster/master.js',
     'lib/internal/process/next_tick.js'
   ])
 
-  t.same(labels, ['needs-ci', 'cluster', 'process'])
-
-  t.end()
+  t.assert.deepStrictEqual(labels, ['needs-ci', 'cluster', 'process'])
 })

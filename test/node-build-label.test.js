@@ -1,10 +1,10 @@
 'use strict'
 
-const tap = require('tap')
+const { test } = require('node:test')
 
 const { resolveLabels } = require('./_resolve-labels-helper')
 
-tap.test('label: "build" when build related files has been changed', (t) => {
+test('label: "build" when build related files has been changed', (t) => {
   const buildRelatedFiles = [
     'configure',
     'node.gyp',
@@ -14,7 +14,6 @@ tap.test('label: "build" when build related files has been changed', (t) => {
     'tools/Makefile',
     'tools/install.py',
     'tools/create_android_makefiles',
-    'tools/genv8constants.py',
     'tools/getnodeversion.py',
     'tools/js2c.py',
     'tools/utils.py',
@@ -24,20 +23,16 @@ tap.test('label: "build" when build related files has been changed', (t) => {
   buildRelatedFiles.forEach((filepath) => {
     const labels = resolveLabels([filepath])
 
-    t.ok(labels.includes('build'), filepath + ' should have "build" label')
-    t.ok(labels.includes('needs-ci'), filepath + ' should have "needs-ci" label')
+    t.assert.ok(labels.includes('build'), filepath + ' should have "build" label')
+    t.assert.ok(labels.includes('needs-ci'), filepath + ' should have "needs-ci" label')
   })
-
-  t.end()
 })
 
-tap.test('labels: not "build" when Makefile in ./deps has been changed', (t) => {
+test('labels: not "build" when Makefile in ./deps has been changed', (t) => {
   const labels = resolveLabels([
     'deps/v8/Makefile'
   ])
 
-  t.notOk(labels.includes('build'))
-  t.ok(labels.includes('needs-ci'))
-
-  t.end()
+  t.assert.ok(!labels.includes('build'))
+  t.assert.ok(labels.includes('needs-ci'))
 })
