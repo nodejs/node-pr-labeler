@@ -1,10 +1,9 @@
 'use strict'
 
-const github = require('@actions/github')
-const core = require('@actions/core')
 const nodeRepo = require('./lib/node-repo')
 
 async function run () {
+  const [github, core] = await Promise.all([import('@actions/github'), import('@actions/core')])
   try {
     const token = core.getInput('repo-token', { required: true })
     const configPath = core.getInput('configuration-path', { required: true })
@@ -18,7 +17,7 @@ async function run () {
     const { owner, repo } = github.context.repo
     const prId = pullRequest.number
     const baseBranch = pullRequest.base.ref
-    const configAsString = await fetchConfig(client, owner, repo, configPath)
+    const configAsString = await fetchConfig(github, client, owner, repo, configPath)
 
     await nodeRepo.resolveLabelsThenUpdatePr({
       baseBranch,
@@ -35,6 +34,7 @@ async function run () {
 }
 
 async function fetchConfig (
+  github,
   client,
   owner,
   repo,
