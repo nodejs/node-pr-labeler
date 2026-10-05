@@ -265,6 +265,21 @@ tap.test('label: "lib / src" when 4 or more JS sub-systems have been changed', (
   t.end()
 })
 
+tap.test('labels: retain fewer than four distinct subsystems despite repeated matches', (t) => {
+  const labels = resolveLabels([
+    'lib/internal/crypto/keys.js',
+    'lib/internal/crypto/cipher.js',
+    'lib/internal/crypto/hash.js',
+    'lib/dns.js',
+    'lib/repl.js',
+    'lib/v8.js'
+  ])
+
+  t.same(labels, ['needs-ci', 'crypto', 'dns', 'repl', 'v8'])
+
+  t.end()
+})
+
 // https://github.com/nodejs/node/pull/12366 should have been labelled "lib / src"
 // https://github.com/nodejs/github-bot/issues/137
 tap.test('label: "lib / src" when 4 or more native files have been changed', (t) => {
