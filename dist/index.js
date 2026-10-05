@@ -1,69 +1,7 @@
-module.exports =
 /******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
-/***/ 2932:
-/***/ ((__unused_webpack_module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const github = __nccwpck_require__(5438)
-const core = __nccwpck_require__(2186)
-const nodeRepo = __nccwpck_require__(693)
-
-async function run () {
-  try {
-    const token = core.getInput('repo-token', { required: true })
-    const configPath = core.getInput('configuration-path', { required: true })
-    const pullRequest = github.context.payload.pull_request
-
-    if (!pullRequest) {
-      throw new Error('Could not resolve pull request number, is Action triggered by something else than a pull request?')
-    }
-
-    const client = github.getOctokit(token)
-    const { owner, repo } = github.context.repo
-    const prId = pullRequest.number
-    const baseBranch = pullRequest.base.ref
-    const configAsString = await fetchConfig(client, owner, repo, configPath)
-
-    await nodeRepo.resolveLabelsThenUpdatePr({
-      baseBranch,
-      client,
-      configAsString,
-      owner,
-      repo,
-      prId
-    })
-  } catch (error) {
-    core.error(error)
-    core.setFailed(error.message)
-  }
-}
-
-async function fetchConfig (
-  client,
-  owner,
-  repo,
-  filepath
-) {
-  const response = await client.repos.getContent({
-    owner,
-    repo,
-    path: filepath,
-    ref: github.context.payload.pull_request.base.repo.default_branch
-  })
-
-  return Buffer.from(response.data.content, response.data.encoding).toString()
-}
-
-run()
-
-
-/***/ }),
-
-/***/ 693:
+/***/ 3191:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
@@ -71,24 +9,42 @@ run()
 
 /* eslint-disable camelcase */
 
-const core = __nccwpck_require__(2186)
-const Aigle = __nccwpck_require__(5306)
+const { setTimeout } = __nccwpck_require__(8500)
 
-const resolveLabels = __nccwpck_require__(4368)
+const resolveLabels = __nccwpck_require__(9414)
+
+let _core
+async function getGHCore () {
+  _core ??= await Promise.all(/* import() */[__nccwpck_require__.e(119), __nccwpck_require__.e(421)]).then(__nccwpck_require__.bind(__nccwpck_require__, 6421))
+  return _core
+}
 
 const fiveSeconds = 5 * 1000
+
+async function retry ({ times = 1, interval }, fn) {
+  const errors = []
+  for (let i = 0; i < times; i++) {
+    if (i) await setTimeout(interval)
+    try {
+      return await fn()
+    } catch (err) {
+      errors.push(err)
+    }
+  }
+  throw new AggregateError(errors, `Failed after ${times} attempts`)
+}
 
 async function resolveLabelsThenUpdatePr (options) {
   const times = options.retries || 5
   const interval = options.retryInterval || fiveSeconds
-  const retry = fn => Aigle.retry({ times, interval }, fn)
 
-  const filepathsChanged = await retry(() => listFiles({
+  const filepathsChanged = await retry({ times, interval }, () => listFiles({
     client: options.client,
     owner: options.owner,
     repo: options.repo,
     pull_number: options.prId
   }))
+  const core = await getGHCore()
   core.debug('Fetching PR files for labelling')
 
   const resolvedLabels = resolveLabels(filepathsChanged, options.baseBranch, options.configAsString)
@@ -97,6 +53,7 @@ async function resolveLabelsThenUpdatePr (options) {
 }
 
 async function fetchExistingThenUpdatePr (options, labels) {
+  const core = await getGHCore()
   try {
     const existingLabels = await fetchExistingLabels(options)
     const labelsToAdd = stringsInCommon(existingLabels, labels)
@@ -118,14 +75,15 @@ async function updatePrWithLabels (options, labels) {
     return
   }
 
+  const core = await getGHCore()
   core.debug('Trying to add labels: ' + labels)
 
   try {
-    await options.client.issues.addLabels({
+    await options.client.rest.issues.addLabels({
       owner: options.owner,
       repo: options.repo,
       issue_number: options.prId,
-      labels: labels
+      labels
     })
 
     core.info('Added labels: ' + labels)
@@ -163,14 +121,14 @@ function stringsInCommon (arr1, arr2) {
 
 async function listFiles ({ owner, repo, pull_number, client }) {
   try {
-    const response = await client.pulls.listFiles({
+    const response = await client.rest.pulls.listFiles({
       owner,
       repo,
       pull_number
     })
     return response.data.map(({ filename }) => filename)
   } catch (err) {
-    core.error('Error retrieving files from GitHub: ' + err)
+    (await getGHCore()).error('Error retrieving files from GitHub: ' + err)
     throw err
   }
 }
@@ -184,13 +142,13 @@ exports._fetchExistingLabels = fetchExistingLabels
 
 /***/ }),
 
-/***/ 4368:
+/***/ 9414:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 "use strict";
 
 
-const yaml = __nccwpck_require__(1917)
+const yaml = __nccwpck_require__(2103)
 
 const ciNeededFolderRx = /^(deps|lib|src|test)\//
 
@@ -274,7 +232,7 @@ function matchAllSubSystem (filepathsChanged, subSystemLabelsMap) {
 
 function matchSubSystemsByRegex (rxLabelsMap, filepathsChanged) {
   const labelsCountLimit = process.env.MAX_LABELS_LIMIT || 4
-  const labelCount = []
+  const labelCount = new Set()
 
   // by putting matched labels into a map, we avoid duplicate labels
   const labelsMap = filepathsChanged.reduce((map, filepath) => {
@@ -292,7 +250,8 @@ function matchSubSystemsByRegex (rxLabelsMap, filepathsChanged) {
     for (let i = 0; i < mappedSubSystems.length; ++i) {
       const mappedSubSystem = mappedSubSystems[i]
       if (hasLibOrSrcChanges(filepathsChanged)) {
-        if (labelCount.length >= labelsCountLimit) {
+        labelCount.add(mappedSubSystem)
+        if (labelCount.size > labelsCountLimit) {
           for (const label of labelCount) {
             // don't delete the `c++` or `needs-ci` labels as we always want those if they have matched
             if (label !== 'c++' && label !== 'needs-ci') delete map[label]
@@ -300,8 +259,6 @@ function matchSubSystemsByRegex (rxLabelsMap, filepathsChanged) {
           map['lib / src'] = true
           // short-circuit
           return map
-        } else {
-          labelCount.push(mappedSubSystem)
         }
       }
 
@@ -353,22367 +310,4015 @@ module.exports = resolveLabels
 
 /***/ }),
 
-/***/ 7351:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) result[k] = mod[k];
-    result["default"] = mod;
-    return result;
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const os = __importStar(__nccwpck_require__(2087));
-const utils_1 = __nccwpck_require__(5278);
-/**
- * Commands
- *
- * Command Format:
- *   ::name key=value,key=value::message
- *
- * Examples:
- *   ::warning::This is the message
- *   ::set-env name=MY_VAR::some value
- */
-function issueCommand(command, properties, message) {
-    const cmd = new Command(command, properties, message);
-    process.stdout.write(cmd.toString() + os.EOL);
-}
-exports.issueCommand = issueCommand;
-function issue(name, message = '') {
-    issueCommand(name, {}, message);
-}
-exports.issue = issue;
-const CMD_STRING = '::';
-class Command {
-    constructor(command, properties, message) {
-        if (!command) {
-            command = 'missing.command';
-        }
-        this.command = command;
-        this.properties = properties;
-        this.message = message;
-    }
-    toString() {
-        let cmdStr = CMD_STRING + this.command;
-        if (this.properties && Object.keys(this.properties).length > 0) {
-            cmdStr += ' ';
-            let first = true;
-            for (const key in this.properties) {
-                if (this.properties.hasOwnProperty(key)) {
-                    const val = this.properties[key];
-                    if (val) {
-                        if (first) {
-                            first = false;
-                        }
-                        else {
-                            cmdStr += ',';
-                        }
-                        cmdStr += `${key}=${escapeProperty(val)}`;
-                    }
-                }
-            }
-        }
-        cmdStr += `${CMD_STRING}${escapeData(this.message)}`;
-        return cmdStr;
-    }
-}
-function escapeData(s) {
-    return utils_1.toCommandValue(s)
-        .replace(/%/g, '%25')
-        .replace(/\r/g, '%0D')
-        .replace(/\n/g, '%0A');
-}
-function escapeProperty(s) {
-    return utils_1.toCommandValue(s)
-        .replace(/%/g, '%25')
-        .replace(/\r/g, '%0D')
-        .replace(/\n/g, '%0A')
-        .replace(/:/g, '%3A')
-        .replace(/,/g, '%2C');
-}
-//# sourceMappingURL=command.js.map
-
-/***/ }),
-
-/***/ 2186:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) result[k] = mod[k];
-    result["default"] = mod;
-    return result;
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const command_1 = __nccwpck_require__(7351);
-const file_command_1 = __nccwpck_require__(717);
-const utils_1 = __nccwpck_require__(5278);
-const os = __importStar(__nccwpck_require__(2087));
-const path = __importStar(__nccwpck_require__(5622));
-/**
- * The code to exit an action
- */
-var ExitCode;
-(function (ExitCode) {
-    /**
-     * A code indicating that the action was successful
-     */
-    ExitCode[ExitCode["Success"] = 0] = "Success";
-    /**
-     * A code indicating that the action was a failure
-     */
-    ExitCode[ExitCode["Failure"] = 1] = "Failure";
-})(ExitCode = exports.ExitCode || (exports.ExitCode = {}));
-//-----------------------------------------------------------------------
-// Variables
-//-----------------------------------------------------------------------
-/**
- * Sets env variable for this action and future actions in the job
- * @param name the name of the variable to set
- * @param val the value of the variable. Non-string values will be converted to a string via JSON.stringify
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function exportVariable(name, val) {
-    const convertedVal = utils_1.toCommandValue(val);
-    process.env[name] = convertedVal;
-    const filePath = process.env['GITHUB_ENV'] || '';
-    if (filePath) {
-        const delimiter = '_GitHubActionsFileCommandDelimeter_';
-        const commandValue = `${name}<<${delimiter}${os.EOL}${convertedVal}${os.EOL}${delimiter}`;
-        file_command_1.issueCommand('ENV', commandValue);
-    }
-    else {
-        command_1.issueCommand('set-env', { name }, convertedVal);
-    }
-}
-exports.exportVariable = exportVariable;
-/**
- * Registers a secret which will get masked from logs
- * @param secret value of the secret
- */
-function setSecret(secret) {
-    command_1.issueCommand('add-mask', {}, secret);
-}
-exports.setSecret = setSecret;
-/**
- * Prepends inputPath to the PATH (for this action and future actions)
- * @param inputPath
- */
-function addPath(inputPath) {
-    const filePath = process.env['GITHUB_PATH'] || '';
-    if (filePath) {
-        file_command_1.issueCommand('PATH', inputPath);
-    }
-    else {
-        command_1.issueCommand('add-path', {}, inputPath);
-    }
-    process.env['PATH'] = `${inputPath}${path.delimiter}${process.env['PATH']}`;
-}
-exports.addPath = addPath;
-/**
- * Gets the value of an input.  The value is also trimmed.
- *
- * @param     name     name of the input to get
- * @param     options  optional. See InputOptions.
- * @returns   string
- */
-function getInput(name, options) {
-    const val = process.env[`INPUT_${name.replace(/ /g, '_').toUpperCase()}`] || '';
-    if (options && options.required && !val) {
-        throw new Error(`Input required and not supplied: ${name}`);
-    }
-    return val.trim();
-}
-exports.getInput = getInput;
-/**
- * Sets the value of an output.
- *
- * @param     name     name of the output to set
- * @param     value    value to store. Non-string values will be converted to a string via JSON.stringify
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function setOutput(name, value) {
-    command_1.issueCommand('set-output', { name }, value);
-}
-exports.setOutput = setOutput;
-/**
- * Enables or disables the echoing of commands into stdout for the rest of the step.
- * Echoing is disabled by default if ACTIONS_STEP_DEBUG is not set.
- *
- */
-function setCommandEcho(enabled) {
-    command_1.issue('echo', enabled ? 'on' : 'off');
-}
-exports.setCommandEcho = setCommandEcho;
-//-----------------------------------------------------------------------
-// Results
-//-----------------------------------------------------------------------
-/**
- * Sets the action status to failed.
- * When the action exits it will be with an exit code of 1
- * @param message add error issue message
- */
-function setFailed(message) {
-    process.exitCode = ExitCode.Failure;
-    error(message);
-}
-exports.setFailed = setFailed;
-//-----------------------------------------------------------------------
-// Logging Commands
-//-----------------------------------------------------------------------
-/**
- * Gets whether Actions Step Debug is on or not
- */
-function isDebug() {
-    return process.env['RUNNER_DEBUG'] === '1';
-}
-exports.isDebug = isDebug;
-/**
- * Writes debug message to user log
- * @param message debug message
- */
-function debug(message) {
-    command_1.issueCommand('debug', {}, message);
-}
-exports.debug = debug;
-/**
- * Adds an error issue
- * @param message error issue message. Errors will be converted to string via toString()
- */
-function error(message) {
-    command_1.issue('error', message instanceof Error ? message.toString() : message);
-}
-exports.error = error;
-/**
- * Adds an warning issue
- * @param message warning issue message. Errors will be converted to string via toString()
- */
-function warning(message) {
-    command_1.issue('warning', message instanceof Error ? message.toString() : message);
-}
-exports.warning = warning;
-/**
- * Writes info to log with console.log.
- * @param message info message
- */
-function info(message) {
-    process.stdout.write(message + os.EOL);
-}
-exports.info = info;
-/**
- * Begin an output group.
- *
- * Output until the next `groupEnd` will be foldable in this group
- *
- * @param name The name of the output group
- */
-function startGroup(name) {
-    command_1.issue('group', name);
-}
-exports.startGroup = startGroup;
-/**
- * End an output group.
- */
-function endGroup() {
-    command_1.issue('endgroup');
-}
-exports.endGroup = endGroup;
-/**
- * Wrap an asynchronous function call in a group.
- *
- * Returns the same type as the function itself.
- *
- * @param name The name of the group
- * @param fn The function to wrap in the group
- */
-function group(name, fn) {
-    return __awaiter(this, void 0, void 0, function* () {
-        startGroup(name);
-        let result;
-        try {
-            result = yield fn();
-        }
-        finally {
-            endGroup();
-        }
-        return result;
-    });
-}
-exports.group = group;
-//-----------------------------------------------------------------------
-// Wrapper action state
-//-----------------------------------------------------------------------
-/**
- * Saves state for current action, the state can only be retrieved by this action's post job execution.
- *
- * @param     name     name of the state to store
- * @param     value    value to store. Non-string values will be converted to a string via JSON.stringify
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function saveState(name, value) {
-    command_1.issueCommand('save-state', { name }, value);
-}
-exports.saveState = saveState;
-/**
- * Gets the value of an state set by this action's main execution.
- *
- * @param     name     name of the state to get
- * @returns   string
- */
-function getState(name) {
-    return process.env[`STATE_${name}`] || '';
-}
-exports.getState = getState;
-//# sourceMappingURL=core.js.map
-
-/***/ }),
-
-/***/ 717:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-// For internal use, subject to change.
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) result[k] = mod[k];
-    result["default"] = mod;
-    return result;
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-// We use any as a valid input type
-/* eslint-disable @typescript-eslint/no-explicit-any */
-const fs = __importStar(__nccwpck_require__(5747));
-const os = __importStar(__nccwpck_require__(2087));
-const utils_1 = __nccwpck_require__(5278);
-function issueCommand(command, message) {
-    const filePath = process.env[`GITHUB_${command}`];
-    if (!filePath) {
-        throw new Error(`Unable to find environment variable for file command ${command}`);
-    }
-    if (!fs.existsSync(filePath)) {
-        throw new Error(`Missing file at path: ${filePath}`);
-    }
-    fs.appendFileSync(filePath, `${utils_1.toCommandValue(message)}${os.EOL}`, {
-        encoding: 'utf8'
-    });
-}
-exports.issueCommand = issueCommand;
-//# sourceMappingURL=file-command.js.map
-
-/***/ }),
-
-/***/ 5278:
+/***/ 2103:
 /***/ ((__unused_webpack_module, exports) => {
 
-"use strict";
-
-// We use any as a valid input type
-/* eslint-disable @typescript-eslint/no-explicit-any */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-/**
- * Sanitizes an input into a string so it can be passed into issueCommand safely
- * @param input input to sanitize into a string
- */
-function toCommandValue(input) {
-    if (input === null || input === undefined) {
-        return '';
-    }
-    else if (typeof input === 'string' || input instanceof String) {
-        return input;
-    }
-    return JSON.stringify(input);
-}
-exports.toCommandValue = toCommandValue;
-//# sourceMappingURL=utils.js.map
-
-/***/ }),
-
-/***/ 4087:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.Context = void 0;
-const fs_1 = __nccwpck_require__(5747);
-const os_1 = __nccwpck_require__(2087);
-class Context {
-    /**
-     * Hydrate the context from the environment
-     */
-    constructor() {
-        this.payload = {};
-        if (process.env.GITHUB_EVENT_PATH) {
-            if (fs_1.existsSync(process.env.GITHUB_EVENT_PATH)) {
-                this.payload = JSON.parse(fs_1.readFileSync(process.env.GITHUB_EVENT_PATH, { encoding: 'utf8' }));
-            }
-            else {
-                const path = process.env.GITHUB_EVENT_PATH;
-                process.stdout.write(`GITHUB_EVENT_PATH ${path} does not exist${os_1.EOL}`);
-            }
-        }
-        this.eventName = process.env.GITHUB_EVENT_NAME;
-        this.sha = process.env.GITHUB_SHA;
-        this.ref = process.env.GITHUB_REF;
-        this.workflow = process.env.GITHUB_WORKFLOW;
-        this.action = process.env.GITHUB_ACTION;
-        this.actor = process.env.GITHUB_ACTOR;
-        this.job = process.env.GITHUB_JOB;
-        this.runNumber = parseInt(process.env.GITHUB_RUN_NUMBER, 10);
-        this.runId = parseInt(process.env.GITHUB_RUN_ID, 10);
-    }
-    get issue() {
-        const payload = this.payload;
-        return Object.assign(Object.assign({}, this.repo), { number: (payload.issue || payload.pull_request || payload).number });
-    }
-    get repo() {
-        if (process.env.GITHUB_REPOSITORY) {
-            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
-            return { owner, repo };
-        }
-        if (this.payload.repository) {
-            return {
-                owner: this.payload.repository.owner.login,
-                repo: this.payload.repository.name
-            };
-        }
-        throw new Error("context.repo requires a GITHUB_REPOSITORY environment variable like 'owner/repo'");
-    }
-}
-exports.Context = Context;
-//# sourceMappingURL=context.js.map
-
-/***/ }),
-
-/***/ 5438:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.getOctokit = exports.context = void 0;
-const Context = __importStar(__nccwpck_require__(4087));
-const utils_1 = __nccwpck_require__(3030);
-exports.context = new Context.Context();
-/**
- * Returns a hydrated octokit ready to use for GitHub Actions
- *
- * @param     token    the repo PAT or GITHUB_TOKEN
- * @param     options  other options to set
- */
-function getOctokit(token, options) {
-    return new utils_1.GitHub(utils_1.getOctokitOptions(token, options));
-}
-exports.getOctokit = getOctokit;
-//# sourceMappingURL=github.js.map
-
-/***/ }),
-
-/***/ 7914:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.getApiBaseUrl = exports.getProxyAgent = exports.getAuthString = void 0;
-const httpClient = __importStar(__nccwpck_require__(9925));
-function getAuthString(token, options) {
-    if (!token && !options.auth) {
-        throw new Error('Parameter token or opts.auth is required');
-    }
-    else if (token && options.auth) {
-        throw new Error('Parameters token and opts.auth may not both be specified');
-    }
-    return typeof options.auth === 'string' ? options.auth : `token ${token}`;
-}
-exports.getAuthString = getAuthString;
-function getProxyAgent(destinationUrl) {
-    const hc = new httpClient.HttpClient();
-    return hc.getAgent(destinationUrl);
-}
-exports.getProxyAgent = getProxyAgent;
-function getApiBaseUrl() {
-    return process.env['GITHUB_API_URL'] || 'https://api.github.com';
-}
-exports.getApiBaseUrl = getApiBaseUrl;
-//# sourceMappingURL=utils.js.map
-
-/***/ }),
-
-/***/ 3030:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.getOctokitOptions = exports.GitHub = exports.context = void 0;
-const Context = __importStar(__nccwpck_require__(4087));
-const Utils = __importStar(__nccwpck_require__(7914));
-// octokit + plugins
-const core_1 = __nccwpck_require__(6762);
-const plugin_rest_endpoint_methods_1 = __nccwpck_require__(3044);
-const plugin_paginate_rest_1 = __nccwpck_require__(4193);
-exports.context = new Context.Context();
-const baseUrl = Utils.getApiBaseUrl();
-const defaults = {
-    baseUrl,
-    request: {
-        agent: Utils.getProxyAgent(baseUrl)
-    }
-};
-exports.GitHub = core_1.Octokit.plugin(plugin_rest_endpoint_methods_1.restEndpointMethods, plugin_paginate_rest_1.paginateRest).defaults(defaults);
-/**
- * Convience function to correctly format Octokit Options to pass into the constructor.
- *
- * @param     token    the repo PAT or GITHUB_TOKEN
- * @param     options  other options to set
- */
-function getOctokitOptions(token, options) {
-    const opts = Object.assign({}, options || {}); // Shallow clone - don't mutate the object provided by the caller
-    // Auth
-    const auth = Utils.getAuthString(token, opts);
-    if (auth) {
-        opts.auth = auth;
-    }
-    return opts;
-}
-exports.getOctokitOptions = getOctokitOptions;
-//# sourceMappingURL=utils.js.map
-
-/***/ }),
-
-/***/ 9925:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-const http = __nccwpck_require__(8605);
-const https = __nccwpck_require__(7211);
-const pm = __nccwpck_require__(6443);
-let tunnel;
-var HttpCodes;
-(function (HttpCodes) {
-    HttpCodes[HttpCodes["OK"] = 200] = "OK";
-    HttpCodes[HttpCodes["MultipleChoices"] = 300] = "MultipleChoices";
-    HttpCodes[HttpCodes["MovedPermanently"] = 301] = "MovedPermanently";
-    HttpCodes[HttpCodes["ResourceMoved"] = 302] = "ResourceMoved";
-    HttpCodes[HttpCodes["SeeOther"] = 303] = "SeeOther";
-    HttpCodes[HttpCodes["NotModified"] = 304] = "NotModified";
-    HttpCodes[HttpCodes["UseProxy"] = 305] = "UseProxy";
-    HttpCodes[HttpCodes["SwitchProxy"] = 306] = "SwitchProxy";
-    HttpCodes[HttpCodes["TemporaryRedirect"] = 307] = "TemporaryRedirect";
-    HttpCodes[HttpCodes["PermanentRedirect"] = 308] = "PermanentRedirect";
-    HttpCodes[HttpCodes["BadRequest"] = 400] = "BadRequest";
-    HttpCodes[HttpCodes["Unauthorized"] = 401] = "Unauthorized";
-    HttpCodes[HttpCodes["PaymentRequired"] = 402] = "PaymentRequired";
-    HttpCodes[HttpCodes["Forbidden"] = 403] = "Forbidden";
-    HttpCodes[HttpCodes["NotFound"] = 404] = "NotFound";
-    HttpCodes[HttpCodes["MethodNotAllowed"] = 405] = "MethodNotAllowed";
-    HttpCodes[HttpCodes["NotAcceptable"] = 406] = "NotAcceptable";
-    HttpCodes[HttpCodes["ProxyAuthenticationRequired"] = 407] = "ProxyAuthenticationRequired";
-    HttpCodes[HttpCodes["RequestTimeout"] = 408] = "RequestTimeout";
-    HttpCodes[HttpCodes["Conflict"] = 409] = "Conflict";
-    HttpCodes[HttpCodes["Gone"] = 410] = "Gone";
-    HttpCodes[HttpCodes["TooManyRequests"] = 429] = "TooManyRequests";
-    HttpCodes[HttpCodes["InternalServerError"] = 500] = "InternalServerError";
-    HttpCodes[HttpCodes["NotImplemented"] = 501] = "NotImplemented";
-    HttpCodes[HttpCodes["BadGateway"] = 502] = "BadGateway";
-    HttpCodes[HttpCodes["ServiceUnavailable"] = 503] = "ServiceUnavailable";
-    HttpCodes[HttpCodes["GatewayTimeout"] = 504] = "GatewayTimeout";
-})(HttpCodes = exports.HttpCodes || (exports.HttpCodes = {}));
-var Headers;
-(function (Headers) {
-    Headers["Accept"] = "accept";
-    Headers["ContentType"] = "content-type";
-})(Headers = exports.Headers || (exports.Headers = {}));
-var MediaTypes;
-(function (MediaTypes) {
-    MediaTypes["ApplicationJson"] = "application/json";
-})(MediaTypes = exports.MediaTypes || (exports.MediaTypes = {}));
-/**
- * Returns the proxy URL, depending upon the supplied url and proxy environment variables.
- * @param serverUrl  The server URL where the request will be sent. For example, https://api.github.com
- */
-function getProxyUrl(serverUrl) {
-    let proxyUrl = pm.getProxyUrl(new URL(serverUrl));
-    return proxyUrl ? proxyUrl.href : '';
-}
-exports.getProxyUrl = getProxyUrl;
-const HttpRedirectCodes = [
-    HttpCodes.MovedPermanently,
-    HttpCodes.ResourceMoved,
-    HttpCodes.SeeOther,
-    HttpCodes.TemporaryRedirect,
-    HttpCodes.PermanentRedirect
-];
-const HttpResponseRetryCodes = [
-    HttpCodes.BadGateway,
-    HttpCodes.ServiceUnavailable,
-    HttpCodes.GatewayTimeout
-];
-const RetryableHttpVerbs = ['OPTIONS', 'GET', 'DELETE', 'HEAD'];
-const ExponentialBackoffCeiling = 10;
-const ExponentialBackoffTimeSlice = 5;
-class HttpClientError extends Error {
-    constructor(message, statusCode) {
-        super(message);
-        this.name = 'HttpClientError';
-        this.statusCode = statusCode;
-        Object.setPrototypeOf(this, HttpClientError.prototype);
-    }
-}
-exports.HttpClientError = HttpClientError;
-class HttpClientResponse {
-    constructor(message) {
-        this.message = message;
-    }
-    readBody() {
-        return new Promise(async (resolve, reject) => {
-            let output = Buffer.alloc(0);
-            this.message.on('data', (chunk) => {
-                output = Buffer.concat([output, chunk]);
-            });
-            this.message.on('end', () => {
-                resolve(output.toString());
-            });
-        });
-    }
-}
-exports.HttpClientResponse = HttpClientResponse;
-function isHttps(requestUrl) {
-    let parsedUrl = new URL(requestUrl);
-    return parsedUrl.protocol === 'https:';
-}
-exports.isHttps = isHttps;
-class HttpClient {
-    constructor(userAgent, handlers, requestOptions) {
-        this._ignoreSslError = false;
-        this._allowRedirects = true;
-        this._allowRedirectDowngrade = false;
-        this._maxRedirects = 50;
-        this._allowRetries = false;
-        this._maxRetries = 1;
-        this._keepAlive = false;
-        this._disposed = false;
-        this.userAgent = userAgent;
-        this.handlers = handlers || [];
-        this.requestOptions = requestOptions;
-        if (requestOptions) {
-            if (requestOptions.ignoreSslError != null) {
-                this._ignoreSslError = requestOptions.ignoreSslError;
-            }
-            this._socketTimeout = requestOptions.socketTimeout;
-            if (requestOptions.allowRedirects != null) {
-                this._allowRedirects = requestOptions.allowRedirects;
-            }
-            if (requestOptions.allowRedirectDowngrade != null) {
-                this._allowRedirectDowngrade = requestOptions.allowRedirectDowngrade;
-            }
-            if (requestOptions.maxRedirects != null) {
-                this._maxRedirects = Math.max(requestOptions.maxRedirects, 0);
-            }
-            if (requestOptions.keepAlive != null) {
-                this._keepAlive = requestOptions.keepAlive;
-            }
-            if (requestOptions.allowRetries != null) {
-                this._allowRetries = requestOptions.allowRetries;
-            }
-            if (requestOptions.maxRetries != null) {
-                this._maxRetries = requestOptions.maxRetries;
-            }
-        }
-    }
-    options(requestUrl, additionalHeaders) {
-        return this.request('OPTIONS', requestUrl, null, additionalHeaders || {});
-    }
-    get(requestUrl, additionalHeaders) {
-        return this.request('GET', requestUrl, null, additionalHeaders || {});
-    }
-    del(requestUrl, additionalHeaders) {
-        return this.request('DELETE', requestUrl, null, additionalHeaders || {});
-    }
-    post(requestUrl, data, additionalHeaders) {
-        return this.request('POST', requestUrl, data, additionalHeaders || {});
-    }
-    patch(requestUrl, data, additionalHeaders) {
-        return this.request('PATCH', requestUrl, data, additionalHeaders || {});
-    }
-    put(requestUrl, data, additionalHeaders) {
-        return this.request('PUT', requestUrl, data, additionalHeaders || {});
-    }
-    head(requestUrl, additionalHeaders) {
-        return this.request('HEAD', requestUrl, null, additionalHeaders || {});
-    }
-    sendStream(verb, requestUrl, stream, additionalHeaders) {
-        return this.request(verb, requestUrl, stream, additionalHeaders);
-    }
-    /**
-     * Gets a typed object from an endpoint
-     * Be aware that not found returns a null.  Other errors (4xx, 5xx) reject the promise
-     */
-    async getJson(requestUrl, additionalHeaders = {}) {
-        additionalHeaders[Headers.Accept] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.Accept, MediaTypes.ApplicationJson);
-        let res = await this.get(requestUrl, additionalHeaders);
-        return this._processResponse(res, this.requestOptions);
-    }
-    async postJson(requestUrl, obj, additionalHeaders = {}) {
-        let data = JSON.stringify(obj, null, 2);
-        additionalHeaders[Headers.Accept] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.Accept, MediaTypes.ApplicationJson);
-        additionalHeaders[Headers.ContentType] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.ContentType, MediaTypes.ApplicationJson);
-        let res = await this.post(requestUrl, data, additionalHeaders);
-        return this._processResponse(res, this.requestOptions);
-    }
-    async putJson(requestUrl, obj, additionalHeaders = {}) {
-        let data = JSON.stringify(obj, null, 2);
-        additionalHeaders[Headers.Accept] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.Accept, MediaTypes.ApplicationJson);
-        additionalHeaders[Headers.ContentType] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.ContentType, MediaTypes.ApplicationJson);
-        let res = await this.put(requestUrl, data, additionalHeaders);
-        return this._processResponse(res, this.requestOptions);
-    }
-    async patchJson(requestUrl, obj, additionalHeaders = {}) {
-        let data = JSON.stringify(obj, null, 2);
-        additionalHeaders[Headers.Accept] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.Accept, MediaTypes.ApplicationJson);
-        additionalHeaders[Headers.ContentType] = this._getExistingOrDefaultHeader(additionalHeaders, Headers.ContentType, MediaTypes.ApplicationJson);
-        let res = await this.patch(requestUrl, data, additionalHeaders);
-        return this._processResponse(res, this.requestOptions);
-    }
-    /**
-     * Makes a raw http request.
-     * All other methods such as get, post, patch, and request ultimately call this.
-     * Prefer get, del, post and patch
-     */
-    async request(verb, requestUrl, data, headers) {
-        if (this._disposed) {
-            throw new Error('Client has already been disposed.');
-        }
-        let parsedUrl = new URL(requestUrl);
-        let info = this._prepareRequest(verb, parsedUrl, headers);
-        // Only perform retries on reads since writes may not be idempotent.
-        let maxTries = this._allowRetries && RetryableHttpVerbs.indexOf(verb) != -1
-            ? this._maxRetries + 1
-            : 1;
-        let numTries = 0;
-        let response;
-        while (numTries < maxTries) {
-            response = await this.requestRaw(info, data);
-            // Check if it's an authentication challenge
-            if (response &&
-                response.message &&
-                response.message.statusCode === HttpCodes.Unauthorized) {
-                let authenticationHandler;
-                for (let i = 0; i < this.handlers.length; i++) {
-                    if (this.handlers[i].canHandleAuthentication(response)) {
-                        authenticationHandler = this.handlers[i];
-                        break;
-                    }
-                }
-                if (authenticationHandler) {
-                    return authenticationHandler.handleAuthentication(this, info, data);
-                }
-                else {
-                    // We have received an unauthorized response but have no handlers to handle it.
-                    // Let the response return to the caller.
-                    return response;
-                }
-            }
-            let redirectsRemaining = this._maxRedirects;
-            while (HttpRedirectCodes.indexOf(response.message.statusCode) != -1 &&
-                this._allowRedirects &&
-                redirectsRemaining > 0) {
-                const redirectUrl = response.message.headers['location'];
-                if (!redirectUrl) {
-                    // if there's no location to redirect to, we won't
-                    break;
-                }
-                let parsedRedirectUrl = new URL(redirectUrl);
-                if (parsedUrl.protocol == 'https:' &&
-                    parsedUrl.protocol != parsedRedirectUrl.protocol &&
-                    !this._allowRedirectDowngrade) {
-                    throw new Error('Redirect from HTTPS to HTTP protocol. This downgrade is not allowed for security reasons. If you want to allow this behavior, set the allowRedirectDowngrade option to true.');
-                }
-                // we need to finish reading the response before reassigning response
-                // which will leak the open socket.
-                await response.readBody();
-                // strip authorization header if redirected to a different hostname
-                if (parsedRedirectUrl.hostname !== parsedUrl.hostname) {
-                    for (let header in headers) {
-                        // header names are case insensitive
-                        if (header.toLowerCase() === 'authorization') {
-                            delete headers[header];
-                        }
-                    }
-                }
-                // let's make the request with the new redirectUrl
-                info = this._prepareRequest(verb, parsedRedirectUrl, headers);
-                response = await this.requestRaw(info, data);
-                redirectsRemaining--;
-            }
-            if (HttpResponseRetryCodes.indexOf(response.message.statusCode) == -1) {
-                // If not a retry code, return immediately instead of retrying
-                return response;
-            }
-            numTries += 1;
-            if (numTries < maxTries) {
-                await response.readBody();
-                await this._performExponentialBackoff(numTries);
-            }
-        }
-        return response;
-    }
-    /**
-     * Needs to be called if keepAlive is set to true in request options.
-     */
-    dispose() {
-        if (this._agent) {
-            this._agent.destroy();
-        }
-        this._disposed = true;
-    }
-    /**
-     * Raw request.
-     * @param info
-     * @param data
-     */
-    requestRaw(info, data) {
-        return new Promise((resolve, reject) => {
-            let callbackForResult = function (err, res) {
-                if (err) {
-                    reject(err);
-                }
-                resolve(res);
-            };
-            this.requestRawWithCallback(info, data, callbackForResult);
-        });
-    }
-    /**
-     * Raw request with callback.
-     * @param info
-     * @param data
-     * @param onResult
-     */
-    requestRawWithCallback(info, data, onResult) {
-        let socket;
-        if (typeof data === 'string') {
-            info.options.headers['Content-Length'] = Buffer.byteLength(data, 'utf8');
-        }
-        let callbackCalled = false;
-        let handleResult = (err, res) => {
-            if (!callbackCalled) {
-                callbackCalled = true;
-                onResult(err, res);
-            }
-        };
-        let req = info.httpModule.request(info.options, (msg) => {
-            let res = new HttpClientResponse(msg);
-            handleResult(null, res);
-        });
-        req.on('socket', sock => {
-            socket = sock;
-        });
-        // If we ever get disconnected, we want the socket to timeout eventually
-        req.setTimeout(this._socketTimeout || 3 * 60000, () => {
-            if (socket) {
-                socket.end();
-            }
-            handleResult(new Error('Request timeout: ' + info.options.path), null);
-        });
-        req.on('error', function (err) {
-            // err has statusCode property
-            // res should have headers
-            handleResult(err, null);
-        });
-        if (data && typeof data === 'string') {
-            req.write(data, 'utf8');
-        }
-        if (data && typeof data !== 'string') {
-            data.on('close', function () {
-                req.end();
-            });
-            data.pipe(req);
-        }
-        else {
-            req.end();
-        }
-    }
-    /**
-     * Gets an http agent. This function is useful when you need an http agent that handles
-     * routing through a proxy server - depending upon the url and proxy environment variables.
-     * @param serverUrl  The server URL where the request will be sent. For example, https://api.github.com
-     */
-    getAgent(serverUrl) {
-        let parsedUrl = new URL(serverUrl);
-        return this._getAgent(parsedUrl);
-    }
-    _prepareRequest(method, requestUrl, headers) {
-        const info = {};
-        info.parsedUrl = requestUrl;
-        const usingSsl = info.parsedUrl.protocol === 'https:';
-        info.httpModule = usingSsl ? https : http;
-        const defaultPort = usingSsl ? 443 : 80;
-        info.options = {};
-        info.options.host = info.parsedUrl.hostname;
-        info.options.port = info.parsedUrl.port
-            ? parseInt(info.parsedUrl.port)
-            : defaultPort;
-        info.options.path =
-            (info.parsedUrl.pathname || '') + (info.parsedUrl.search || '');
-        info.options.method = method;
-        info.options.headers = this._mergeHeaders(headers);
-        if (this.userAgent != null) {
-            info.options.headers['user-agent'] = this.userAgent;
-        }
-        info.options.agent = this._getAgent(info.parsedUrl);
-        // gives handlers an opportunity to participate
-        if (this.handlers) {
-            this.handlers.forEach(handler => {
-                handler.prepareRequest(info.options);
-            });
-        }
-        return info;
-    }
-    _mergeHeaders(headers) {
-        const lowercaseKeys = obj => Object.keys(obj).reduce((c, k) => ((c[k.toLowerCase()] = obj[k]), c), {});
-        if (this.requestOptions && this.requestOptions.headers) {
-            return Object.assign({}, lowercaseKeys(this.requestOptions.headers), lowercaseKeys(headers));
-        }
-        return lowercaseKeys(headers || {});
-    }
-    _getExistingOrDefaultHeader(additionalHeaders, header, _default) {
-        const lowercaseKeys = obj => Object.keys(obj).reduce((c, k) => ((c[k.toLowerCase()] = obj[k]), c), {});
-        let clientHeader;
-        if (this.requestOptions && this.requestOptions.headers) {
-            clientHeader = lowercaseKeys(this.requestOptions.headers)[header];
-        }
-        return additionalHeaders[header] || clientHeader || _default;
-    }
-    _getAgent(parsedUrl) {
-        let agent;
-        let proxyUrl = pm.getProxyUrl(parsedUrl);
-        let useProxy = proxyUrl && proxyUrl.hostname;
-        if (this._keepAlive && useProxy) {
-            agent = this._proxyAgent;
-        }
-        if (this._keepAlive && !useProxy) {
-            agent = this._agent;
-        }
-        // if agent is already assigned use that agent.
-        if (!!agent) {
-            return agent;
-        }
-        const usingSsl = parsedUrl.protocol === 'https:';
-        let maxSockets = 100;
-        if (!!this.requestOptions) {
-            maxSockets = this.requestOptions.maxSockets || http.globalAgent.maxSockets;
-        }
-        if (useProxy) {
-            // If using proxy, need tunnel
-            if (!tunnel) {
-                tunnel = __nccwpck_require__(4294);
-            }
-            const agentOptions = {
-                maxSockets: maxSockets,
-                keepAlive: this._keepAlive,
-                proxy: {
-                    proxyAuth: `${proxyUrl.username}:${proxyUrl.password}`,
-                    host: proxyUrl.hostname,
-                    port: proxyUrl.port
-                }
-            };
-            let tunnelAgent;
-            const overHttps = proxyUrl.protocol === 'https:';
-            if (usingSsl) {
-                tunnelAgent = overHttps ? tunnel.httpsOverHttps : tunnel.httpsOverHttp;
-            }
-            else {
-                tunnelAgent = overHttps ? tunnel.httpOverHttps : tunnel.httpOverHttp;
-            }
-            agent = tunnelAgent(agentOptions);
-            this._proxyAgent = agent;
-        }
-        // if reusing agent across request and tunneling agent isn't assigned create a new agent
-        if (this._keepAlive && !agent) {
-            const options = { keepAlive: this._keepAlive, maxSockets: maxSockets };
-            agent = usingSsl ? new https.Agent(options) : new http.Agent(options);
-            this._agent = agent;
-        }
-        // if not using private agent and tunnel agent isn't setup then use global agent
-        if (!agent) {
-            agent = usingSsl ? https.globalAgent : http.globalAgent;
-        }
-        if (usingSsl && this._ignoreSslError) {
-            // we don't want to set NODE_TLS_REJECT_UNAUTHORIZED=0 since that will affect request for entire process
-            // http.RequestOptions doesn't expose a way to modify RequestOptions.agent.options
-            // we have to cast it to any and change it directly
-            agent.options = Object.assign(agent.options || {}, {
-                rejectUnauthorized: false
-            });
-        }
-        return agent;
-    }
-    _performExponentialBackoff(retryNumber) {
-        retryNumber = Math.min(ExponentialBackoffCeiling, retryNumber);
-        const ms = ExponentialBackoffTimeSlice * Math.pow(2, retryNumber);
-        return new Promise(resolve => setTimeout(() => resolve(), ms));
-    }
-    static dateTimeDeserializer(key, value) {
-        if (typeof value === 'string') {
-            let a = new Date(value);
-            if (!isNaN(a.valueOf())) {
-                return a;
-            }
-        }
-        return value;
-    }
-    async _processResponse(res, options) {
-        return new Promise(async (resolve, reject) => {
-            const statusCode = res.message.statusCode;
-            const response = {
-                statusCode: statusCode,
-                result: null,
-                headers: {}
-            };
-            // not found leads to null obj returned
-            if (statusCode == HttpCodes.NotFound) {
-                resolve(response);
-            }
-            let obj;
-            let contents;
-            // get the result from the body
-            try {
-                contents = await res.readBody();
-                if (contents && contents.length > 0) {
-                    if (options && options.deserializeDates) {
-                        obj = JSON.parse(contents, HttpClient.dateTimeDeserializer);
-                    }
-                    else {
-                        obj = JSON.parse(contents);
-                    }
-                    response.result = obj;
-                }
-                response.headers = res.message.headers;
-            }
-            catch (err) {
-                // Invalid resource (contents not json);  leaving result obj null
-            }
-            // note that 3xx redirects are handled by the http layer.
-            if (statusCode > 299) {
-                let msg;
-                // if exception/error in body, attempt to get better error
-                if (obj && obj.message) {
-                    msg = obj.message;
-                }
-                else if (contents && contents.length > 0) {
-                    // it may be the case that the exception is in the body message as string
-                    msg = contents;
-                }
-                else {
-                    msg = 'Failed request: (' + statusCode + ')';
-                }
-                let err = new HttpClientError(msg, statusCode);
-                err.result = response.result;
-                reject(err);
-            }
-            else {
-                resolve(response);
-            }
-        });
-    }
-}
-exports.HttpClient = HttpClient;
-
-
-/***/ }),
-
-/***/ 6443:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-function getProxyUrl(reqUrl) {
-    let usingSsl = reqUrl.protocol === 'https:';
-    let proxyUrl;
-    if (checkBypass(reqUrl)) {
-        return proxyUrl;
-    }
-    let proxyVar;
-    if (usingSsl) {
-        proxyVar = process.env['https_proxy'] || process.env['HTTPS_PROXY'];
-    }
-    else {
-        proxyVar = process.env['http_proxy'] || process.env['HTTP_PROXY'];
-    }
-    if (proxyVar) {
-        proxyUrl = new URL(proxyVar);
-    }
-    return proxyUrl;
-}
-exports.getProxyUrl = getProxyUrl;
-function checkBypass(reqUrl) {
-    if (!reqUrl.hostname) {
-        return false;
-    }
-    let noProxy = process.env['no_proxy'] || process.env['NO_PROXY'] || '';
-    if (!noProxy) {
-        return false;
-    }
-    // Determine the request port
-    let reqPort;
-    if (reqUrl.port) {
-        reqPort = Number(reqUrl.port);
-    }
-    else if (reqUrl.protocol === 'http:') {
-        reqPort = 80;
-    }
-    else if (reqUrl.protocol === 'https:') {
-        reqPort = 443;
-    }
-    // Format the request hostname and hostname with port
-    let upperReqHosts = [reqUrl.hostname.toUpperCase()];
-    if (typeof reqPort === 'number') {
-        upperReqHosts.push(`${upperReqHosts[0]}:${reqPort}`);
-    }
-    // Compare request host against noproxy
-    for (let upperNoProxyItem of noProxy
-        .split(',')
-        .map(x => x.trim().toUpperCase())
-        .filter(x => x)) {
-        if (upperReqHosts.some(x => x === upperNoProxyItem)) {
-            return true;
-        }
-    }
-    return false;
-}
-exports.checkBypass = checkBypass;
-
-
-/***/ }),
-
-/***/ 334:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-async function auth(token) {
-  const tokenType = token.split(/\./).length === 3 ? "app" : /^v\d+\./.test(token) ? "installation" : "oauth";
-  return {
-    type: "token",
-    token: token,
-    tokenType
-  };
-}
-
-/**
- * Prefix token for usage in the Authorization header
- *
- * @param token OAuth token or JSON Web Token
- */
-function withAuthorizationPrefix(token) {
-  if (token.split(/\./).length === 3) {
-    return `bearer ${token}`;
-  }
-
-  return `token ${token}`;
-}
-
-async function hook(token, request, route, parameters) {
-  const endpoint = request.endpoint.merge(route, parameters);
-  endpoint.headers.authorization = withAuthorizationPrefix(token);
-  return request(endpoint);
-}
-
-const createTokenAuth = function createTokenAuth(token) {
-  if (!token) {
-    throw new Error("[@octokit/auth-token] No token passed to createTokenAuth");
-  }
-
-  if (typeof token !== "string") {
-    throw new Error("[@octokit/auth-token] Token passed to createTokenAuth is not a string");
-  }
-
-  token = token.replace(/^(token|bearer) +/i, "");
-  return Object.assign(auth.bind(null, token), {
-    hook: hook.bind(null, token)
-  });
-};
-
-exports.createTokenAuth = createTokenAuth;
-//# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 6762:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-var universalUserAgent = __nccwpck_require__(5030);
-var beforeAfterHook = __nccwpck_require__(3682);
-var request = __nccwpck_require__(6234);
-var graphql = __nccwpck_require__(8467);
-var authToken = __nccwpck_require__(334);
-
-function _objectWithoutPropertiesLoose(source, excluded) {
-  if (source == null) return {};
-  var target = {};
-  var sourceKeys = Object.keys(source);
-  var key, i;
-
-  for (i = 0; i < sourceKeys.length; i++) {
-    key = sourceKeys[i];
-    if (excluded.indexOf(key) >= 0) continue;
-    target[key] = source[key];
-  }
-
-  return target;
-}
-
-function _objectWithoutProperties(source, excluded) {
-  if (source == null) return {};
-
-  var target = _objectWithoutPropertiesLoose(source, excluded);
-
-  var key, i;
-
-  if (Object.getOwnPropertySymbols) {
-    var sourceSymbolKeys = Object.getOwnPropertySymbols(source);
-
-    for (i = 0; i < sourceSymbolKeys.length; i++) {
-      key = sourceSymbolKeys[i];
-      if (excluded.indexOf(key) >= 0) continue;
-      if (!Object.prototype.propertyIsEnumerable.call(source, key)) continue;
-      target[key] = source[key];
-    }
-  }
-
-  return target;
-}
-
-const VERSION = "3.2.5";
-
-class Octokit {
-  constructor(options = {}) {
-    const hook = new beforeAfterHook.Collection();
-    const requestDefaults = {
-      baseUrl: request.request.endpoint.DEFAULTS.baseUrl,
-      headers: {},
-      request: Object.assign({}, options.request, {
-        hook: hook.bind(null, "request")
-      }),
-      mediaType: {
-        previews: [],
-        format: ""
-      }
-    }; // prepend default user agent with `options.userAgent` if set
-
-    requestDefaults.headers["user-agent"] = [options.userAgent, `octokit-core.js/${VERSION} ${universalUserAgent.getUserAgent()}`].filter(Boolean).join(" ");
-
-    if (options.baseUrl) {
-      requestDefaults.baseUrl = options.baseUrl;
-    }
-
-    if (options.previews) {
-      requestDefaults.mediaType.previews = options.previews;
-    }
-
-    if (options.timeZone) {
-      requestDefaults.headers["time-zone"] = options.timeZone;
-    }
-
-    this.request = request.request.defaults(requestDefaults);
-    this.graphql = graphql.withCustomRequest(this.request).defaults(requestDefaults);
-    this.log = Object.assign({
-      debug: () => {},
-      info: () => {},
-      warn: console.warn.bind(console),
-      error: console.error.bind(console)
-    }, options.log);
-    this.hook = hook; // (1) If neither `options.authStrategy` nor `options.auth` are set, the `octokit` instance
-    //     is unauthenticated. The `this.auth()` method is a no-op and no request hook is registered.
-    // (2) If only `options.auth` is set, use the default token authentication strategy.
-    // (3) If `options.authStrategy` is set then use it and pass in `options.auth`. Always pass own request as many strategies accept a custom request instance.
-    // TODO: type `options.auth` based on `options.authStrategy`.
-
-    if (!options.authStrategy) {
-      if (!options.auth) {
-        // (1)
-        this.auth = async () => ({
-          type: "unauthenticated"
-        });
-      } else {
-        // (2)
-        const auth = authToken.createTokenAuth(options.auth); // @ts-ignore  ¯\_(ツ)_/¯
-
-        hook.wrap("request", auth.hook);
-        this.auth = auth;
-      }
-    } else {
-      const {
-        authStrategy
-      } = options,
-            otherOptions = _objectWithoutProperties(options, ["authStrategy"]);
-
-      const auth = authStrategy(Object.assign({
-        request: this.request,
-        log: this.log,
-        // we pass the current octokit instance as well as its constructor options
-        // to allow for authentication strategies that return a new octokit instance
-        // that shares the same internal state as the current one. The original
-        // requirement for this was the "event-octokit" authentication strategy
-        // of https://github.com/probot/octokit-auth-probot.
-        octokit: this,
-        octokitOptions: otherOptions
-      }, options.auth)); // @ts-ignore  ¯\_(ツ)_/¯
-
-      hook.wrap("request", auth.hook);
-      this.auth = auth;
-    } // apply plugins
-    // https://stackoverflow.com/a/16345172
-
-
-    const classConstructor = this.constructor;
-    classConstructor.plugins.forEach(plugin => {
-      Object.assign(this, plugin(this, options));
-    });
-  }
-
-  static defaults(defaults) {
-    const OctokitWithDefaults = class extends this {
-      constructor(...args) {
-        const options = args[0] || {};
-
-        if (typeof defaults === "function") {
-          super(defaults(options));
-          return;
-        }
-
-        super(Object.assign({}, defaults, options, options.userAgent && defaults.userAgent ? {
-          userAgent: `${options.userAgent} ${defaults.userAgent}`
-        } : null));
-      }
-
-    };
-    return OctokitWithDefaults;
-  }
-  /**
-   * Attach a plugin (or many) to your Octokit instance.
-   *
-   * @example
-   * const API = Octokit.plugin(plugin1, plugin2, plugin3, ...)
-   */
-
-
-  static plugin(...newPlugins) {
-    var _a;
-
-    const currentPlugins = this.plugins;
-    const NewOctokit = (_a = class extends this {}, _a.plugins = currentPlugins.concat(newPlugins.filter(plugin => !currentPlugins.includes(plugin))), _a);
-    return NewOctokit;
-  }
-
-}
-Octokit.VERSION = VERSION;
-Octokit.plugins = [];
-
-exports.Octokit = Octokit;
-//# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 9440:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-var isPlainObject = __nccwpck_require__(3287);
-var universalUserAgent = __nccwpck_require__(5030);
-
-function lowercaseKeys(object) {
-  if (!object) {
-    return {};
-  }
-
-  return Object.keys(object).reduce((newObj, key) => {
-    newObj[key.toLowerCase()] = object[key];
-    return newObj;
-  }, {});
-}
-
-function mergeDeep(defaults, options) {
-  const result = Object.assign({}, defaults);
-  Object.keys(options).forEach(key => {
-    if (isPlainObject.isPlainObject(options[key])) {
-      if (!(key in defaults)) Object.assign(result, {
-        [key]: options[key]
-      });else result[key] = mergeDeep(defaults[key], options[key]);
-    } else {
-      Object.assign(result, {
-        [key]: options[key]
-      });
-    }
-  });
-  return result;
-}
-
-function removeUndefinedProperties(obj) {
-  for (const key in obj) {
-    if (obj[key] === undefined) {
-      delete obj[key];
-    }
-  }
-
-  return obj;
-}
-
-function merge(defaults, route, options) {
-  if (typeof route === "string") {
-    let [method, url] = route.split(" ");
-    options = Object.assign(url ? {
-      method,
-      url
-    } : {
-      url: method
-    }, options);
-  } else {
-    options = Object.assign({}, route);
-  } // lowercase header names before merging with defaults to avoid duplicates
-
-
-  options.headers = lowercaseKeys(options.headers); // remove properties with undefined values before merging
-
-  removeUndefinedProperties(options);
-  removeUndefinedProperties(options.headers);
-  const mergedOptions = mergeDeep(defaults || {}, options); // mediaType.previews arrays are merged, instead of overwritten
-
-  if (defaults && defaults.mediaType.previews.length) {
-    mergedOptions.mediaType.previews = defaults.mediaType.previews.filter(preview => !mergedOptions.mediaType.previews.includes(preview)).concat(mergedOptions.mediaType.previews);
-  }
-
-  mergedOptions.mediaType.previews = mergedOptions.mediaType.previews.map(preview => preview.replace(/-preview/, ""));
-  return mergedOptions;
-}
-
-function addQueryParameters(url, parameters) {
-  const separator = /\?/.test(url) ? "&" : "?";
-  const names = Object.keys(parameters);
-
-  if (names.length === 0) {
-    return url;
-  }
-
-  return url + separator + names.map(name => {
-    if (name === "q") {
-      return "q=" + parameters.q.split("+").map(encodeURIComponent).join("+");
-    }
-
-    return `${name}=${encodeURIComponent(parameters[name])}`;
-  }).join("&");
-}
-
-const urlVariableRegex = /\{[^}]+\}/g;
-
-function removeNonChars(variableName) {
-  return variableName.replace(/^\W+|\W+$/g, "").split(/,/);
-}
-
-function extractUrlVariableNames(url) {
-  const matches = url.match(urlVariableRegex);
-
-  if (!matches) {
-    return [];
-  }
-
-  return matches.map(removeNonChars).reduce((a, b) => a.concat(b), []);
-}
-
-function omit(object, keysToOmit) {
-  return Object.keys(object).filter(option => !keysToOmit.includes(option)).reduce((obj, key) => {
-    obj[key] = object[key];
-    return obj;
-  }, {});
-}
-
-// Based on https://github.com/bramstein/url-template, licensed under BSD
-// TODO: create separate package.
-//
-// Copyright (c) 2012-2014, Bram Stein
-// All rights reserved.
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions
-// are met:
-//  1. Redistributions of source code must retain the above copyright
-//     notice, this list of conditions and the following disclaimer.
-//  2. Redistributions in binary form must reproduce the above copyright
-//     notice, this list of conditions and the following disclaimer in the
-//     documentation and/or other materials provided with the distribution.
-//  3. The name of the author may not be used to endorse or promote products
-//     derived from this software without specific prior written permission.
-// THIS SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY EXPRESS OR IMPLIED
-// WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
-// MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
-// EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
-// INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
-// BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
-// OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-// NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
-// EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-/* istanbul ignore file */
-function encodeReserved(str) {
-  return str.split(/(%[0-9A-Fa-f]{2})/g).map(function (part) {
-    if (!/%[0-9A-Fa-f]/.test(part)) {
-      part = encodeURI(part).replace(/%5B/g, "[").replace(/%5D/g, "]");
-    }
-
-    return part;
-  }).join("");
-}
-
-function encodeUnreserved(str) {
-  return encodeURIComponent(str).replace(/[!'()*]/g, function (c) {
-    return "%" + c.charCodeAt(0).toString(16).toUpperCase();
-  });
-}
-
-function encodeValue(operator, value, key) {
-  value = operator === "+" || operator === "#" ? encodeReserved(value) : encodeUnreserved(value);
-
-  if (key) {
-    return encodeUnreserved(key) + "=" + value;
-  } else {
-    return value;
-  }
-}
-
-function isDefined(value) {
-  return value !== undefined && value !== null;
-}
-
-function isKeyOperator(operator) {
-  return operator === ";" || operator === "&" || operator === "?";
-}
-
-function getValues(context, operator, key, modifier) {
-  var value = context[key],
-      result = [];
-
-  if (isDefined(value) && value !== "") {
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      value = value.toString();
-
-      if (modifier && modifier !== "*") {
-        value = value.substring(0, parseInt(modifier, 10));
-      }
-
-      result.push(encodeValue(operator, value, isKeyOperator(operator) ? key : ""));
-    } else {
-      if (modifier === "*") {
-        if (Array.isArray(value)) {
-          value.filter(isDefined).forEach(function (value) {
-            result.push(encodeValue(operator, value, isKeyOperator(operator) ? key : ""));
-          });
-        } else {
-          Object.keys(value).forEach(function (k) {
-            if (isDefined(value[k])) {
-              result.push(encodeValue(operator, value[k], k));
-            }
-          });
-        }
-      } else {
-        const tmp = [];
-
-        if (Array.isArray(value)) {
-          value.filter(isDefined).forEach(function (value) {
-            tmp.push(encodeValue(operator, value));
-          });
-        } else {
-          Object.keys(value).forEach(function (k) {
-            if (isDefined(value[k])) {
-              tmp.push(encodeUnreserved(k));
-              tmp.push(encodeValue(operator, value[k].toString()));
-            }
-          });
-        }
-
-        if (isKeyOperator(operator)) {
-          result.push(encodeUnreserved(key) + "=" + tmp.join(","));
-        } else if (tmp.length !== 0) {
-          result.push(tmp.join(","));
-        }
-      }
-    }
-  } else {
-    if (operator === ";") {
-      if (isDefined(value)) {
-        result.push(encodeUnreserved(key));
-      }
-    } else if (value === "" && (operator === "&" || operator === "?")) {
-      result.push(encodeUnreserved(key) + "=");
-    } else if (value === "") {
-      result.push("");
-    }
-  }
-
-  return result;
-}
-
-function parseUrl(template) {
-  return {
-    expand: expand.bind(null, template)
-  };
-}
-
-function expand(template, context) {
-  var operators = ["+", "#", ".", "/", ";", "?", "&"];
-  return template.replace(/\{([^\{\}]+)\}|([^\{\}]+)/g, function (_, expression, literal) {
-    if (expression) {
-      let operator = "";
-      const values = [];
-
-      if (operators.indexOf(expression.charAt(0)) !== -1) {
-        operator = expression.charAt(0);
-        expression = expression.substr(1);
-      }
-
-      expression.split(/,/g).forEach(function (variable) {
-        var tmp = /([^:\*]*)(?::(\d+)|(\*))?/.exec(variable);
-        values.push(getValues(context, operator, tmp[1], tmp[2] || tmp[3]));
-      });
-
-      if (operator && operator !== "+") {
-        var separator = ",";
-
-        if (operator === "?") {
-          separator = "&";
-        } else if (operator !== "#") {
-          separator = operator;
-        }
-
-        return (values.length !== 0 ? operator : "") + values.join(separator);
-      } else {
-        return values.join(",");
-      }
-    } else {
-      return encodeReserved(literal);
-    }
-  });
-}
-
-function parse(options) {
-  // https://fetch.spec.whatwg.org/#methods
-  let method = options.method.toUpperCase(); // replace :varname with {varname} to make it RFC 6570 compatible
-
-  let url = (options.url || "/").replace(/:([a-z]\w+)/g, "{$1}");
-  let headers = Object.assign({}, options.headers);
-  let body;
-  let parameters = omit(options, ["method", "baseUrl", "url", "headers", "request", "mediaType"]); // extract variable names from URL to calculate remaining variables later
-
-  const urlVariableNames = extractUrlVariableNames(url);
-  url = parseUrl(url).expand(parameters);
-
-  if (!/^http/.test(url)) {
-    url = options.baseUrl + url;
-  }
-
-  const omittedParameters = Object.keys(options).filter(option => urlVariableNames.includes(option)).concat("baseUrl");
-  const remainingParameters = omit(parameters, omittedParameters);
-  const isBinaryRequest = /application\/octet-stream/i.test(headers.accept);
-
-  if (!isBinaryRequest) {
-    if (options.mediaType.format) {
-      // e.g. application/vnd.github.v3+json => application/vnd.github.v3.raw
-      headers.accept = headers.accept.split(/,/).map(preview => preview.replace(/application\/vnd(\.\w+)(\.v3)?(\.\w+)?(\+json)?$/, `application/vnd$1$2.${options.mediaType.format}`)).join(",");
-    }
-
-    if (options.mediaType.previews.length) {
-      const previewsFromAcceptHeader = headers.accept.match(/[\w-]+(?=-preview)/g) || [];
-      headers.accept = previewsFromAcceptHeader.concat(options.mediaType.previews).map(preview => {
-        const format = options.mediaType.format ? `.${options.mediaType.format}` : "+json";
-        return `application/vnd.github.${preview}-preview${format}`;
-      }).join(",");
-    }
-  } // for GET/HEAD requests, set URL query parameters from remaining parameters
-  // for PATCH/POST/PUT/DELETE requests, set request body from remaining parameters
-
-
-  if (["GET", "HEAD"].includes(method)) {
-    url = addQueryParameters(url, remainingParameters);
-  } else {
-    if ("data" in remainingParameters) {
-      body = remainingParameters.data;
-    } else {
-      if (Object.keys(remainingParameters).length) {
-        body = remainingParameters;
-      } else {
-        headers["content-length"] = 0;
-      }
-    }
-  } // default content-type for JSON if body is set
-
-
-  if (!headers["content-type"] && typeof body !== "undefined") {
-    headers["content-type"] = "application/json; charset=utf-8";
-  } // GitHub expects 'content-length: 0' header for PUT/PATCH requests without body.
-  // fetch does not allow to set `content-length` header, but we can set body to an empty string
-
-
-  if (["PATCH", "PUT"].includes(method) && typeof body === "undefined") {
-    body = "";
-  } // Only return body/request keys if present
-
-
-  return Object.assign({
-    method,
-    url,
-    headers
-  }, typeof body !== "undefined" ? {
-    body
-  } : null, options.request ? {
-    request: options.request
-  } : null);
-}
-
-function endpointWithDefaults(defaults, route, options) {
-  return parse(merge(defaults, route, options));
-}
-
-function withDefaults(oldDefaults, newDefaults) {
-  const DEFAULTS = merge(oldDefaults, newDefaults);
-  const endpoint = endpointWithDefaults.bind(null, DEFAULTS);
-  return Object.assign(endpoint, {
-    DEFAULTS,
-    defaults: withDefaults.bind(null, DEFAULTS),
-    merge: merge.bind(null, DEFAULTS),
-    parse
-  });
-}
-
-const VERSION = "6.0.11";
-
-const userAgent = `octokit-endpoint.js/${VERSION} ${universalUserAgent.getUserAgent()}`; // DEFAULTS has all properties set that EndpointOptions has, except url.
-// So we use RequestParameters and add method as additional required property.
-
-const DEFAULTS = {
-  method: "GET",
-  baseUrl: "https://api.github.com",
-  headers: {
-    accept: "application/vnd.github.v3+json",
-    "user-agent": userAgent
-  },
-  mediaType: {
-    format: "",
-    previews: []
-  }
-};
-
-const endpoint = withDefaults(null, DEFAULTS);
-
-exports.endpoint = endpoint;
-//# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 8467:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-var request = __nccwpck_require__(6234);
-var universalUserAgent = __nccwpck_require__(5030);
-
-const VERSION = "4.6.0";
-
-class GraphqlError extends Error {
-  constructor(request, response) {
-    const message = response.data.errors[0].message;
-    super(message);
-    Object.assign(this, response.data);
-    Object.assign(this, {
-      headers: response.headers
-    });
-    this.name = "GraphqlError";
-    this.request = request; // Maintains proper stack trace (only available on V8)
-
-    /* istanbul ignore next */
-
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, this.constructor);
-    }
-  }
-
-}
-
-const NON_VARIABLE_OPTIONS = ["method", "baseUrl", "url", "headers", "request", "query", "mediaType"];
-const GHES_V3_SUFFIX_REGEX = /\/api\/v3\/?$/;
-function graphql(request, query, options) {
-  if (typeof query === "string" && options && "query" in options) {
-    return Promise.reject(new Error(`[@octokit/graphql] "query" cannot be used as variable name`));
-  }
-
-  const parsedOptions = typeof query === "string" ? Object.assign({
-    query
-  }, options) : query;
-  const requestOptions = Object.keys(parsedOptions).reduce((result, key) => {
-    if (NON_VARIABLE_OPTIONS.includes(key)) {
-      result[key] = parsedOptions[key];
-      return result;
-    }
-
-    if (!result.variables) {
-      result.variables = {};
-    }
-
-    result.variables[key] = parsedOptions[key];
-    return result;
-  }, {}); // workaround for GitHub Enterprise baseUrl set with /api/v3 suffix
-  // https://github.com/octokit/auth-app.js/issues/111#issuecomment-657610451
-
-  const baseUrl = parsedOptions.baseUrl || request.endpoint.DEFAULTS.baseUrl;
-
-  if (GHES_V3_SUFFIX_REGEX.test(baseUrl)) {
-    requestOptions.url = baseUrl.replace(GHES_V3_SUFFIX_REGEX, "/api/graphql");
-  }
-
-  return request(requestOptions).then(response => {
-    if (response.data.errors) {
-      const headers = {};
-
-      for (const key of Object.keys(response.headers)) {
-        headers[key] = response.headers[key];
-      }
-
-      throw new GraphqlError(requestOptions, {
-        headers,
-        data: response.data
-      });
-    }
-
-    return response.data.data;
-  });
-}
-
-function withDefaults(request$1, newDefaults) {
-  const newRequest = request$1.defaults(newDefaults);
-
-  const newApi = (query, options) => {
-    return graphql(newRequest, query, options);
-  };
-
-  return Object.assign(newApi, {
-    defaults: withDefaults.bind(null, newRequest),
-    endpoint: request.request.endpoint
-  });
-}
-
-const graphql$1 = withDefaults(request.request, {
-  headers: {
-    "user-agent": `octokit-graphql.js/${VERSION} ${universalUserAgent.getUserAgent()}`
-  },
-  method: "POST",
-  url: "/graphql"
-});
-function withCustomRequest(customRequest) {
-  return withDefaults(customRequest, {
-    method: "POST",
-    url: "/graphql"
-  });
-}
-
-exports.graphql = graphql$1;
-exports.withCustomRequest = withCustomRequest;
-//# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 4193:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-const VERSION = "2.11.0";
-
-/**
- * Some “list” response that can be paginated have a different response structure
- *
- * They have a `total_count` key in the response (search also has `incomplete_results`,
- * /installation/repositories also has `repository_selection`), as well as a key with
- * the list of the items which name varies from endpoint to endpoint.
- *
- * Octokit normalizes these responses so that paginated results are always returned following
- * the same structure. One challenge is that if the list response has only one page, no Link
- * header is provided, so this header alone is not sufficient to check wether a response is
- * paginated or not.
- *
- * We check if a "total_count" key is present in the response data, but also make sure that
- * a "url" property is not, as the "Get the combined status for a specific ref" endpoint would
- * otherwise match: https://developer.github.com/v3/repos/statuses/#get-the-combined-status-for-a-specific-ref
- */
-function normalizePaginatedListResponse(response) {
-  const responseNeedsNormalization = "total_count" in response.data && !("url" in response.data);
-  if (!responseNeedsNormalization) return response; // keep the additional properties intact as there is currently no other way
-  // to retrieve the same information.
-
-  const incompleteResults = response.data.incomplete_results;
-  const repositorySelection = response.data.repository_selection;
-  const totalCount = response.data.total_count;
-  delete response.data.incomplete_results;
-  delete response.data.repository_selection;
-  delete response.data.total_count;
-  const namespaceKey = Object.keys(response.data)[0];
-  const data = response.data[namespaceKey];
-  response.data = data;
-
-  if (typeof incompleteResults !== "undefined") {
-    response.data.incomplete_results = incompleteResults;
-  }
-
-  if (typeof repositorySelection !== "undefined") {
-    response.data.repository_selection = repositorySelection;
-  }
-
-  response.data.total_count = totalCount;
-  return response;
-}
-
-function iterator(octokit, route, parameters) {
-  const options = typeof route === "function" ? route.endpoint(parameters) : octokit.request.endpoint(route, parameters);
-  const requestMethod = typeof route === "function" ? route : octokit.request;
-  const method = options.method;
-  const headers = options.headers;
-  let url = options.url;
-  return {
-    [Symbol.asyncIterator]: () => ({
-      async next() {
-        if (!url) return {
-          done: true
-        };
-        const response = await requestMethod({
-          method,
-          url,
-          headers
-        });
-        const normalizedResponse = normalizePaginatedListResponse(response); // `response.headers.link` format:
-        // '<https://api.github.com/users/aseemk/followers?page=2>; rel="next", <https://api.github.com/users/aseemk/followers?page=2>; rel="last"'
-        // sets `url` to undefined if "next" URL is not present or `link` header is not set
-
-        url = ((normalizedResponse.headers.link || "").match(/<([^>]+)>;\s*rel="next"/) || [])[1];
-        return {
-          value: normalizedResponse
-        };
-      }
-
-    })
-  };
-}
-
-function paginate(octokit, route, parameters, mapFn) {
-  if (typeof parameters === "function") {
-    mapFn = parameters;
-    parameters = undefined;
-  }
-
-  return gather(octokit, [], iterator(octokit, route, parameters)[Symbol.asyncIterator](), mapFn);
-}
-
-function gather(octokit, results, iterator, mapFn) {
-  return iterator.next().then(result => {
-    if (result.done) {
-      return results;
-    }
-
-    let earlyExit = false;
-
-    function done() {
-      earlyExit = true;
-    }
-
-    results = results.concat(mapFn ? mapFn(result.value, done) : result.value.data);
-
-    if (earlyExit) {
-      return results;
-    }
-
-    return gather(octokit, results, iterator, mapFn);
-  });
-}
-
-const composePaginateRest = Object.assign(paginate, {
-  iterator
-});
-
-/**
- * @param octokit Octokit instance
- * @param options Options passed to Octokit constructor
- */
-
-function paginateRest(octokit) {
-  return {
-    paginate: Object.assign(paginate.bind(null, octokit), {
-      iterator: iterator.bind(null, octokit)
-    })
-  };
-}
-paginateRest.VERSION = VERSION;
-
-exports.composePaginateRest = composePaginateRest;
-exports.paginateRest = paginateRest;
-//# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 3044:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-const Endpoints = {
-  actions: {
-    addSelectedRepoToOrgSecret: ["PUT /orgs/{org}/actions/secrets/{secret_name}/repositories/{repository_id}"],
-    cancelWorkflowRun: ["POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel"],
-    createOrUpdateEnvironmentSecret: ["PUT /repositories/{repository_id}/environments/{environment_name}/secrets/{secret_name}"],
-    createOrUpdateOrgSecret: ["PUT /orgs/{org}/actions/secrets/{secret_name}"],
-    createOrUpdateRepoSecret: ["PUT /repos/{owner}/{repo}/actions/secrets/{secret_name}"],
-    createRegistrationTokenForOrg: ["POST /orgs/{org}/actions/runners/registration-token"],
-    createRegistrationTokenForRepo: ["POST /repos/{owner}/{repo}/actions/runners/registration-token"],
-    createRemoveTokenForOrg: ["POST /orgs/{org}/actions/runners/remove-token"],
-    createRemoveTokenForRepo: ["POST /repos/{owner}/{repo}/actions/runners/remove-token"],
-    createWorkflowDispatch: ["POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches"],
-    deleteArtifact: ["DELETE /repos/{owner}/{repo}/actions/artifacts/{artifact_id}"],
-    deleteEnvironmentSecret: ["DELETE /repositories/{repository_id}/environments/{environment_name}/secrets/{secret_name}"],
-    deleteOrgSecret: ["DELETE /orgs/{org}/actions/secrets/{secret_name}"],
-    deleteRepoSecret: ["DELETE /repos/{owner}/{repo}/actions/secrets/{secret_name}"],
-    deleteSelfHostedRunnerFromOrg: ["DELETE /orgs/{org}/actions/runners/{runner_id}"],
-    deleteSelfHostedRunnerFromRepo: ["DELETE /repos/{owner}/{repo}/actions/runners/{runner_id}"],
-    deleteWorkflowRun: ["DELETE /repos/{owner}/{repo}/actions/runs/{run_id}"],
-    deleteWorkflowRunLogs: ["DELETE /repos/{owner}/{repo}/actions/runs/{run_id}/logs"],
-    disableSelectedRepositoryGithubActionsOrganization: ["DELETE /orgs/{org}/actions/permissions/repositories/{repository_id}"],
-    disableWorkflow: ["PUT /repos/{owner}/{repo}/actions/workflows/{workflow_id}/disable"],
-    downloadArtifact: ["GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}/{archive_format}"],
-    downloadJobLogsForWorkflowRun: ["GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs"],
-    downloadWorkflowRunLogs: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs"],
-    enableSelectedRepositoryGithubActionsOrganization: ["PUT /orgs/{org}/actions/permissions/repositories/{repository_id}"],
-    enableWorkflow: ["PUT /repos/{owner}/{repo}/actions/workflows/{workflow_id}/enable"],
-    getAllowedActionsOrganization: ["GET /orgs/{org}/actions/permissions/selected-actions"],
-    getAllowedActionsRepository: ["GET /repos/{owner}/{repo}/actions/permissions/selected-actions"],
-    getArtifact: ["GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}"],
-    getEnvironmentPublicKey: ["GET /repositories/{repository_id}/environments/{environment_name}/secrets/public-key"],
-    getEnvironmentSecret: ["GET /repositories/{repository_id}/environments/{environment_name}/secrets/{secret_name}"],
-    getGithubActionsPermissionsOrganization: ["GET /orgs/{org}/actions/permissions"],
-    getGithubActionsPermissionsRepository: ["GET /repos/{owner}/{repo}/actions/permissions"],
-    getJobForWorkflowRun: ["GET /repos/{owner}/{repo}/actions/jobs/{job_id}"],
-    getOrgPublicKey: ["GET /orgs/{org}/actions/secrets/public-key"],
-    getOrgSecret: ["GET /orgs/{org}/actions/secrets/{secret_name}"],
-    getPendingDeploymentsForRun: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/pending_deployments"],
-    getRepoPermissions: ["GET /repos/{owner}/{repo}/actions/permissions", {}, {
-      renamed: ["actions", "getGithubActionsPermissionsRepository"]
-    }],
-    getRepoPublicKey: ["GET /repos/{owner}/{repo}/actions/secrets/public-key"],
-    getRepoSecret: ["GET /repos/{owner}/{repo}/actions/secrets/{secret_name}"],
-    getReviewsForRun: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/approvals"],
-    getSelfHostedRunnerForOrg: ["GET /orgs/{org}/actions/runners/{runner_id}"],
-    getSelfHostedRunnerForRepo: ["GET /repos/{owner}/{repo}/actions/runners/{runner_id}"],
-    getWorkflow: ["GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}"],
-    getWorkflowRun: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}"],
-    getWorkflowRunUsage: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/timing"],
-    getWorkflowUsage: ["GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/timing"],
-    listArtifactsForRepo: ["GET /repos/{owner}/{repo}/actions/artifacts"],
-    listEnvironmentSecrets: ["GET /repositories/{repository_id}/environments/{environment_name}/secrets"],
-    listJobsForWorkflowRun: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs"],
-    listOrgSecrets: ["GET /orgs/{org}/actions/secrets"],
-    listRepoSecrets: ["GET /repos/{owner}/{repo}/actions/secrets"],
-    listRepoWorkflows: ["GET /repos/{owner}/{repo}/actions/workflows"],
-    listRunnerApplicationsForOrg: ["GET /orgs/{org}/actions/runners/downloads"],
-    listRunnerApplicationsForRepo: ["GET /repos/{owner}/{repo}/actions/runners/downloads"],
-    listSelectedReposForOrgSecret: ["GET /orgs/{org}/actions/secrets/{secret_name}/repositories"],
-    listSelectedRepositoriesEnabledGithubActionsOrganization: ["GET /orgs/{org}/actions/permissions/repositories"],
-    listSelfHostedRunnersForOrg: ["GET /orgs/{org}/actions/runners"],
-    listSelfHostedRunnersForRepo: ["GET /repos/{owner}/{repo}/actions/runners"],
-    listWorkflowRunArtifacts: ["GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts"],
-    listWorkflowRuns: ["GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs"],
-    listWorkflowRunsForRepo: ["GET /repos/{owner}/{repo}/actions/runs"],
-    reRunWorkflow: ["POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun"],
-    removeSelectedRepoFromOrgSecret: ["DELETE /orgs/{org}/actions/secrets/{secret_name}/repositories/{repository_id}"],
-    reviewPendingDeploymentsForRun: ["POST /repos/{owner}/{repo}/actions/runs/{run_id}/pending_deployments"],
-    setAllowedActionsOrganization: ["PUT /orgs/{org}/actions/permissions/selected-actions"],
-    setAllowedActionsRepository: ["PUT /repos/{owner}/{repo}/actions/permissions/selected-actions"],
-    setGithubActionsPermissionsOrganization: ["PUT /orgs/{org}/actions/permissions"],
-    setGithubActionsPermissionsRepository: ["PUT /repos/{owner}/{repo}/actions/permissions"],
-    setSelectedReposForOrgSecret: ["PUT /orgs/{org}/actions/secrets/{secret_name}/repositories"],
-    setSelectedRepositoriesEnabledGithubActionsOrganization: ["PUT /orgs/{org}/actions/permissions/repositories"]
-  },
-  activity: {
-    checkRepoIsStarredByAuthenticatedUser: ["GET /user/starred/{owner}/{repo}"],
-    deleteRepoSubscription: ["DELETE /repos/{owner}/{repo}/subscription"],
-    deleteThreadSubscription: ["DELETE /notifications/threads/{thread_id}/subscription"],
-    getFeeds: ["GET /feeds"],
-    getRepoSubscription: ["GET /repos/{owner}/{repo}/subscription"],
-    getThread: ["GET /notifications/threads/{thread_id}"],
-    getThreadSubscriptionForAuthenticatedUser: ["GET /notifications/threads/{thread_id}/subscription"],
-    listEventsForAuthenticatedUser: ["GET /users/{username}/events"],
-    listNotificationsForAuthenticatedUser: ["GET /notifications"],
-    listOrgEventsForAuthenticatedUser: ["GET /users/{username}/events/orgs/{org}"],
-    listPublicEvents: ["GET /events"],
-    listPublicEventsForRepoNetwork: ["GET /networks/{owner}/{repo}/events"],
-    listPublicEventsForUser: ["GET /users/{username}/events/public"],
-    listPublicOrgEvents: ["GET /orgs/{org}/events"],
-    listReceivedEventsForUser: ["GET /users/{username}/received_events"],
-    listReceivedPublicEventsForUser: ["GET /users/{username}/received_events/public"],
-    listRepoEvents: ["GET /repos/{owner}/{repo}/events"],
-    listRepoNotificationsForAuthenticatedUser: ["GET /repos/{owner}/{repo}/notifications"],
-    listReposStarredByAuthenticatedUser: ["GET /user/starred"],
-    listReposStarredByUser: ["GET /users/{username}/starred"],
-    listReposWatchedByUser: ["GET /users/{username}/subscriptions"],
-    listStargazersForRepo: ["GET /repos/{owner}/{repo}/stargazers"],
-    listWatchedReposForAuthenticatedUser: ["GET /user/subscriptions"],
-    listWatchersForRepo: ["GET /repos/{owner}/{repo}/subscribers"],
-    markNotificationsAsRead: ["PUT /notifications"],
-    markRepoNotificationsAsRead: ["PUT /repos/{owner}/{repo}/notifications"],
-    markThreadAsRead: ["PATCH /notifications/threads/{thread_id}"],
-    setRepoSubscription: ["PUT /repos/{owner}/{repo}/subscription"],
-    setThreadSubscription: ["PUT /notifications/threads/{thread_id}/subscription"],
-    starRepoForAuthenticatedUser: ["PUT /user/starred/{owner}/{repo}"],
-    unstarRepoForAuthenticatedUser: ["DELETE /user/starred/{owner}/{repo}"]
-  },
-  apps: {
-    addRepoToInstallation: ["PUT /user/installations/{installation_id}/repositories/{repository_id}"],
-    checkToken: ["POST /applications/{client_id}/token"],
-    createContentAttachment: ["POST /content_references/{content_reference_id}/attachments", {
-      mediaType: {
-        previews: ["corsair"]
-      }
-    }],
-    createFromManifest: ["POST /app-manifests/{code}/conversions"],
-    createInstallationAccessToken: ["POST /app/installations/{installation_id}/access_tokens"],
-    deleteAuthorization: ["DELETE /applications/{client_id}/grant"],
-    deleteInstallation: ["DELETE /app/installations/{installation_id}"],
-    deleteToken: ["DELETE /applications/{client_id}/token"],
-    getAuthenticated: ["GET /app"],
-    getBySlug: ["GET /apps/{app_slug}"],
-    getInstallation: ["GET /app/installations/{installation_id}"],
-    getOrgInstallation: ["GET /orgs/{org}/installation"],
-    getRepoInstallation: ["GET /repos/{owner}/{repo}/installation"],
-    getSubscriptionPlanForAccount: ["GET /marketplace_listing/accounts/{account_id}"],
-    getSubscriptionPlanForAccountStubbed: ["GET /marketplace_listing/stubbed/accounts/{account_id}"],
-    getUserInstallation: ["GET /users/{username}/installation"],
-    getWebhookConfigForApp: ["GET /app/hook/config"],
-    listAccountsForPlan: ["GET /marketplace_listing/plans/{plan_id}/accounts"],
-    listAccountsForPlanStubbed: ["GET /marketplace_listing/stubbed/plans/{plan_id}/accounts"],
-    listInstallationReposForAuthenticatedUser: ["GET /user/installations/{installation_id}/repositories"],
-    listInstallations: ["GET /app/installations"],
-    listInstallationsForAuthenticatedUser: ["GET /user/installations"],
-    listPlans: ["GET /marketplace_listing/plans"],
-    listPlansStubbed: ["GET /marketplace_listing/stubbed/plans"],
-    listReposAccessibleToInstallation: ["GET /installation/repositories"],
-    listSubscriptionsForAuthenticatedUser: ["GET /user/marketplace_purchases"],
-    listSubscriptionsForAuthenticatedUserStubbed: ["GET /user/marketplace_purchases/stubbed"],
-    removeRepoFromInstallation: ["DELETE /user/installations/{installation_id}/repositories/{repository_id}"],
-    resetToken: ["PATCH /applications/{client_id}/token"],
-    revokeInstallationAccessToken: ["DELETE /installation/token"],
-    scopeToken: ["POST /applications/{client_id}/token/scoped"],
-    suspendInstallation: ["PUT /app/installations/{installation_id}/suspended"],
-    unsuspendInstallation: ["DELETE /app/installations/{installation_id}/suspended"],
-    updateWebhookConfigForApp: ["PATCH /app/hook/config"]
-  },
-  billing: {
-    getGithubActionsBillingOrg: ["GET /orgs/{org}/settings/billing/actions"],
-    getGithubActionsBillingUser: ["GET /users/{username}/settings/billing/actions"],
-    getGithubPackagesBillingOrg: ["GET /orgs/{org}/settings/billing/packages"],
-    getGithubPackagesBillingUser: ["GET /users/{username}/settings/billing/packages"],
-    getSharedStorageBillingOrg: ["GET /orgs/{org}/settings/billing/shared-storage"],
-    getSharedStorageBillingUser: ["GET /users/{username}/settings/billing/shared-storage"]
-  },
-  checks: {
-    create: ["POST /repos/{owner}/{repo}/check-runs"],
-    createSuite: ["POST /repos/{owner}/{repo}/check-suites"],
-    get: ["GET /repos/{owner}/{repo}/check-runs/{check_run_id}"],
-    getSuite: ["GET /repos/{owner}/{repo}/check-suites/{check_suite_id}"],
-    listAnnotations: ["GET /repos/{owner}/{repo}/check-runs/{check_run_id}/annotations"],
-    listForRef: ["GET /repos/{owner}/{repo}/commits/{ref}/check-runs"],
-    listForSuite: ["GET /repos/{owner}/{repo}/check-suites/{check_suite_id}/check-runs"],
-    listSuitesForRef: ["GET /repos/{owner}/{repo}/commits/{ref}/check-suites"],
-    rerequestSuite: ["POST /repos/{owner}/{repo}/check-suites/{check_suite_id}/rerequest"],
-    setSuitesPreferences: ["PATCH /repos/{owner}/{repo}/check-suites/preferences"],
-    update: ["PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}"]
-  },
-  codeScanning: {
-    deleteAnalysis: ["DELETE /repos/{owner}/{repo}/code-scanning/analyses/{analysis_id}{?confirm_delete}"],
-    getAlert: ["GET /repos/{owner}/{repo}/code-scanning/alerts/{alert_number}", {}, {
-      renamedParameters: {
-        alert_id: "alert_number"
-      }
-    }],
-    getAnalysis: ["GET /repos/{owner}/{repo}/code-scanning/analyses/{analysis_id}"],
-    getSarif: ["GET /repos/{owner}/{repo}/code-scanning/sarifs/{sarif_id}"],
-    listAlertsForRepo: ["GET /repos/{owner}/{repo}/code-scanning/alerts"],
-    listAlertsInstances: ["GET /repos/{owner}/{repo}/code-scanning/alerts/{alert_number}/instances"],
-    listRecentAnalyses: ["GET /repos/{owner}/{repo}/code-scanning/analyses"],
-    updateAlert: ["PATCH /repos/{owner}/{repo}/code-scanning/alerts/{alert_number}"],
-    uploadSarif: ["POST /repos/{owner}/{repo}/code-scanning/sarifs"]
-  },
-  codesOfConduct: {
-    getAllCodesOfConduct: ["GET /codes_of_conduct", {
-      mediaType: {
-        previews: ["scarlet-witch"]
-      }
-    }],
-    getConductCode: ["GET /codes_of_conduct/{key}", {
-      mediaType: {
-        previews: ["scarlet-witch"]
-      }
-    }],
-    getForRepo: ["GET /repos/{owner}/{repo}/community/code_of_conduct", {
-      mediaType: {
-        previews: ["scarlet-witch"]
-      }
-    }]
-  },
-  emojis: {
-    get: ["GET /emojis"]
-  },
-  enterpriseAdmin: {
-    disableSelectedOrganizationGithubActionsEnterprise: ["DELETE /enterprises/{enterprise}/actions/permissions/organizations/{org_id}"],
-    enableSelectedOrganizationGithubActionsEnterprise: ["PUT /enterprises/{enterprise}/actions/permissions/organizations/{org_id}"],
-    getAllowedActionsEnterprise: ["GET /enterprises/{enterprise}/actions/permissions/selected-actions"],
-    getGithubActionsPermissionsEnterprise: ["GET /enterprises/{enterprise}/actions/permissions"],
-    listSelectedOrganizationsEnabledGithubActionsEnterprise: ["GET /enterprises/{enterprise}/actions/permissions/organizations"],
-    setAllowedActionsEnterprise: ["PUT /enterprises/{enterprise}/actions/permissions/selected-actions"],
-    setGithubActionsPermissionsEnterprise: ["PUT /enterprises/{enterprise}/actions/permissions"],
-    setSelectedOrganizationsEnabledGithubActionsEnterprise: ["PUT /enterprises/{enterprise}/actions/permissions/organizations"]
-  },
-  gists: {
-    checkIsStarred: ["GET /gists/{gist_id}/star"],
-    create: ["POST /gists"],
-    createComment: ["POST /gists/{gist_id}/comments"],
-    delete: ["DELETE /gists/{gist_id}"],
-    deleteComment: ["DELETE /gists/{gist_id}/comments/{comment_id}"],
-    fork: ["POST /gists/{gist_id}/forks"],
-    get: ["GET /gists/{gist_id}"],
-    getComment: ["GET /gists/{gist_id}/comments/{comment_id}"],
-    getRevision: ["GET /gists/{gist_id}/{sha}"],
-    list: ["GET /gists"],
-    listComments: ["GET /gists/{gist_id}/comments"],
-    listCommits: ["GET /gists/{gist_id}/commits"],
-    listForUser: ["GET /users/{username}/gists"],
-    listForks: ["GET /gists/{gist_id}/forks"],
-    listPublic: ["GET /gists/public"],
-    listStarred: ["GET /gists/starred"],
-    star: ["PUT /gists/{gist_id}/star"],
-    unstar: ["DELETE /gists/{gist_id}/star"],
-    update: ["PATCH /gists/{gist_id}"],
-    updateComment: ["PATCH /gists/{gist_id}/comments/{comment_id}"]
-  },
-  git: {
-    createBlob: ["POST /repos/{owner}/{repo}/git/blobs"],
-    createCommit: ["POST /repos/{owner}/{repo}/git/commits"],
-    createRef: ["POST /repos/{owner}/{repo}/git/refs"],
-    createTag: ["POST /repos/{owner}/{repo}/git/tags"],
-    createTree: ["POST /repos/{owner}/{repo}/git/trees"],
-    deleteRef: ["DELETE /repos/{owner}/{repo}/git/refs/{ref}"],
-    getBlob: ["GET /repos/{owner}/{repo}/git/blobs/{file_sha}"],
-    getCommit: ["GET /repos/{owner}/{repo}/git/commits/{commit_sha}"],
-    getRef: ["GET /repos/{owner}/{repo}/git/ref/{ref}"],
-    getTag: ["GET /repos/{owner}/{repo}/git/tags/{tag_sha}"],
-    getTree: ["GET /repos/{owner}/{repo}/git/trees/{tree_sha}"],
-    listMatchingRefs: ["GET /repos/{owner}/{repo}/git/matching-refs/{ref}"],
-    updateRef: ["PATCH /repos/{owner}/{repo}/git/refs/{ref}"]
-  },
-  gitignore: {
-    getAllTemplates: ["GET /gitignore/templates"],
-    getTemplate: ["GET /gitignore/templates/{name}"]
-  },
-  interactions: {
-    getRestrictionsForAuthenticatedUser: ["GET /user/interaction-limits"],
-    getRestrictionsForOrg: ["GET /orgs/{org}/interaction-limits"],
-    getRestrictionsForRepo: ["GET /repos/{owner}/{repo}/interaction-limits"],
-    getRestrictionsForYourPublicRepos: ["GET /user/interaction-limits", {}, {
-      renamed: ["interactions", "getRestrictionsForAuthenticatedUser"]
-    }],
-    removeRestrictionsForAuthenticatedUser: ["DELETE /user/interaction-limits"],
-    removeRestrictionsForOrg: ["DELETE /orgs/{org}/interaction-limits"],
-    removeRestrictionsForRepo: ["DELETE /repos/{owner}/{repo}/interaction-limits"],
-    removeRestrictionsForYourPublicRepos: ["DELETE /user/interaction-limits", {}, {
-      renamed: ["interactions", "removeRestrictionsForAuthenticatedUser"]
-    }],
-    setRestrictionsForAuthenticatedUser: ["PUT /user/interaction-limits"],
-    setRestrictionsForOrg: ["PUT /orgs/{org}/interaction-limits"],
-    setRestrictionsForRepo: ["PUT /repos/{owner}/{repo}/interaction-limits"],
-    setRestrictionsForYourPublicRepos: ["PUT /user/interaction-limits", {}, {
-      renamed: ["interactions", "setRestrictionsForAuthenticatedUser"]
-    }]
-  },
-  issues: {
-    addAssignees: ["POST /repos/{owner}/{repo}/issues/{issue_number}/assignees"],
-    addLabels: ["POST /repos/{owner}/{repo}/issues/{issue_number}/labels"],
-    checkUserCanBeAssigned: ["GET /repos/{owner}/{repo}/assignees/{assignee}"],
-    create: ["POST /repos/{owner}/{repo}/issues"],
-    createComment: ["POST /repos/{owner}/{repo}/issues/{issue_number}/comments"],
-    createLabel: ["POST /repos/{owner}/{repo}/labels"],
-    createMilestone: ["POST /repos/{owner}/{repo}/milestones"],
-    deleteComment: ["DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}"],
-    deleteLabel: ["DELETE /repos/{owner}/{repo}/labels/{name}"],
-    deleteMilestone: ["DELETE /repos/{owner}/{repo}/milestones/{milestone_number}"],
-    get: ["GET /repos/{owner}/{repo}/issues/{issue_number}"],
-    getComment: ["GET /repos/{owner}/{repo}/issues/comments/{comment_id}"],
-    getEvent: ["GET /repos/{owner}/{repo}/issues/events/{event_id}"],
-    getLabel: ["GET /repos/{owner}/{repo}/labels/{name}"],
-    getMilestone: ["GET /repos/{owner}/{repo}/milestones/{milestone_number}"],
-    list: ["GET /issues"],
-    listAssignees: ["GET /repos/{owner}/{repo}/assignees"],
-    listComments: ["GET /repos/{owner}/{repo}/issues/{issue_number}/comments"],
-    listCommentsForRepo: ["GET /repos/{owner}/{repo}/issues/comments"],
-    listEvents: ["GET /repos/{owner}/{repo}/issues/{issue_number}/events"],
-    listEventsForRepo: ["GET /repos/{owner}/{repo}/issues/events"],
-    listEventsForTimeline: ["GET /repos/{owner}/{repo}/issues/{issue_number}/timeline", {
-      mediaType: {
-        previews: ["mockingbird"]
-      }
-    }],
-    listForAuthenticatedUser: ["GET /user/issues"],
-    listForOrg: ["GET /orgs/{org}/issues"],
-    listForRepo: ["GET /repos/{owner}/{repo}/issues"],
-    listLabelsForMilestone: ["GET /repos/{owner}/{repo}/milestones/{milestone_number}/labels"],
-    listLabelsForRepo: ["GET /repos/{owner}/{repo}/labels"],
-    listLabelsOnIssue: ["GET /repos/{owner}/{repo}/issues/{issue_number}/labels"],
-    listMilestones: ["GET /repos/{owner}/{repo}/milestones"],
-    lock: ["PUT /repos/{owner}/{repo}/issues/{issue_number}/lock"],
-    removeAllLabels: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels"],
-    removeAssignees: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/assignees"],
-    removeLabel: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/labels/{name}"],
-    setLabels: ["PUT /repos/{owner}/{repo}/issues/{issue_number}/labels"],
-    unlock: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/lock"],
-    update: ["PATCH /repos/{owner}/{repo}/issues/{issue_number}"],
-    updateComment: ["PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}"],
-    updateLabel: ["PATCH /repos/{owner}/{repo}/labels/{name}"],
-    updateMilestone: ["PATCH /repos/{owner}/{repo}/milestones/{milestone_number}"]
-  },
-  licenses: {
-    get: ["GET /licenses/{license}"],
-    getAllCommonlyUsed: ["GET /licenses"],
-    getForRepo: ["GET /repos/{owner}/{repo}/license"]
-  },
-  markdown: {
-    render: ["POST /markdown"],
-    renderRaw: ["POST /markdown/raw", {
-      headers: {
-        "content-type": "text/plain; charset=utf-8"
-      }
-    }]
-  },
-  meta: {
-    get: ["GET /meta"],
-    getOctocat: ["GET /octocat"],
-    getZen: ["GET /zen"],
-    root: ["GET /"]
-  },
-  migrations: {
-    cancelImport: ["DELETE /repos/{owner}/{repo}/import"],
-    deleteArchiveForAuthenticatedUser: ["DELETE /user/migrations/{migration_id}/archive", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    deleteArchiveForOrg: ["DELETE /orgs/{org}/migrations/{migration_id}/archive", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    downloadArchiveForOrg: ["GET /orgs/{org}/migrations/{migration_id}/archive", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    getArchiveForAuthenticatedUser: ["GET /user/migrations/{migration_id}/archive", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    getCommitAuthors: ["GET /repos/{owner}/{repo}/import/authors"],
-    getImportStatus: ["GET /repos/{owner}/{repo}/import"],
-    getLargeFiles: ["GET /repos/{owner}/{repo}/import/large_files"],
-    getStatusForAuthenticatedUser: ["GET /user/migrations/{migration_id}", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    getStatusForOrg: ["GET /orgs/{org}/migrations/{migration_id}", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    listForAuthenticatedUser: ["GET /user/migrations", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    listForOrg: ["GET /orgs/{org}/migrations", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    listReposForOrg: ["GET /orgs/{org}/migrations/{migration_id}/repositories", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    listReposForUser: ["GET /user/migrations/{migration_id}/repositories", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    mapCommitAuthor: ["PATCH /repos/{owner}/{repo}/import/authors/{author_id}"],
-    setLfsPreference: ["PATCH /repos/{owner}/{repo}/import/lfs"],
-    startForAuthenticatedUser: ["POST /user/migrations"],
-    startForOrg: ["POST /orgs/{org}/migrations"],
-    startImport: ["PUT /repos/{owner}/{repo}/import"],
-    unlockRepoForAuthenticatedUser: ["DELETE /user/migrations/{migration_id}/repos/{repo_name}/lock", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    unlockRepoForOrg: ["DELETE /orgs/{org}/migrations/{migration_id}/repos/{repo_name}/lock", {
-      mediaType: {
-        previews: ["wyandotte"]
-      }
-    }],
-    updateImport: ["PATCH /repos/{owner}/{repo}/import"]
-  },
-  orgs: {
-    blockUser: ["PUT /orgs/{org}/blocks/{username}"],
-    cancelInvitation: ["DELETE /orgs/{org}/invitations/{invitation_id}"],
-    checkBlockedUser: ["GET /orgs/{org}/blocks/{username}"],
-    checkMembershipForUser: ["GET /orgs/{org}/members/{username}"],
-    checkPublicMembershipForUser: ["GET /orgs/{org}/public_members/{username}"],
-    convertMemberToOutsideCollaborator: ["PUT /orgs/{org}/outside_collaborators/{username}"],
-    createInvitation: ["POST /orgs/{org}/invitations"],
-    createWebhook: ["POST /orgs/{org}/hooks"],
-    deleteWebhook: ["DELETE /orgs/{org}/hooks/{hook_id}"],
-    get: ["GET /orgs/{org}"],
-    getMembershipForAuthenticatedUser: ["GET /user/memberships/orgs/{org}"],
-    getMembershipForUser: ["GET /orgs/{org}/memberships/{username}"],
-    getWebhook: ["GET /orgs/{org}/hooks/{hook_id}"],
-    getWebhookConfigForOrg: ["GET /orgs/{org}/hooks/{hook_id}/config"],
-    list: ["GET /organizations"],
-    listAppInstallations: ["GET /orgs/{org}/installations"],
-    listBlockedUsers: ["GET /orgs/{org}/blocks"],
-    listFailedInvitations: ["GET /orgs/{org}/failed_invitations"],
-    listForAuthenticatedUser: ["GET /user/orgs"],
-    listForUser: ["GET /users/{username}/orgs"],
-    listInvitationTeams: ["GET /orgs/{org}/invitations/{invitation_id}/teams"],
-    listMembers: ["GET /orgs/{org}/members"],
-    listMembershipsForAuthenticatedUser: ["GET /user/memberships/orgs"],
-    listOutsideCollaborators: ["GET /orgs/{org}/outside_collaborators"],
-    listPendingInvitations: ["GET /orgs/{org}/invitations"],
-    listPublicMembers: ["GET /orgs/{org}/public_members"],
-    listWebhooks: ["GET /orgs/{org}/hooks"],
-    pingWebhook: ["POST /orgs/{org}/hooks/{hook_id}/pings"],
-    removeMember: ["DELETE /orgs/{org}/members/{username}"],
-    removeMembershipForUser: ["DELETE /orgs/{org}/memberships/{username}"],
-    removeOutsideCollaborator: ["DELETE /orgs/{org}/outside_collaborators/{username}"],
-    removePublicMembershipForAuthenticatedUser: ["DELETE /orgs/{org}/public_members/{username}"],
-    setMembershipForUser: ["PUT /orgs/{org}/memberships/{username}"],
-    setPublicMembershipForAuthenticatedUser: ["PUT /orgs/{org}/public_members/{username}"],
-    unblockUser: ["DELETE /orgs/{org}/blocks/{username}"],
-    update: ["PATCH /orgs/{org}"],
-    updateMembershipForAuthenticatedUser: ["PATCH /user/memberships/orgs/{org}"],
-    updateWebhook: ["PATCH /orgs/{org}/hooks/{hook_id}"],
-    updateWebhookConfigForOrg: ["PATCH /orgs/{org}/hooks/{hook_id}/config"]
-  },
-  packages: {
-    deletePackageForAuthenticatedUser: ["DELETE /user/packages/{package_type}/{package_name}"],
-    deletePackageForOrg: ["DELETE /orgs/{org}/packages/{package_type}/{package_name}"],
-    deletePackageVersionForAuthenticatedUser: ["DELETE /user/packages/{package_type}/{package_name}/versions/{package_version_id}"],
-    deletePackageVersionForOrg: ["DELETE /orgs/{org}/packages/{package_type}/{package_name}/versions/{package_version_id}"],
-    getAllPackageVersionsForAPackageOwnedByAnOrg: ["GET /orgs/{org}/packages/{package_type}/{package_name}/versions"],
-    getAllPackageVersionsForAPackageOwnedByTheAuthenticatedUser: ["GET /user/packages/{package_type}/{package_name}/versions"],
-    getAllPackageVersionsForPackageOwnedByUser: ["GET /users/{username}/packages/{package_type}/{package_name}/versions"],
-    getPackageForAuthenticatedUser: ["GET /user/packages/{package_type}/{package_name}"],
-    getPackageForOrganization: ["GET /orgs/{org}/packages/{package_type}/{package_name}"],
-    getPackageForUser: ["GET /users/{username}/packages/{package_type}/{package_name}"],
-    getPackageVersionForAuthenticatedUser: ["GET /user/packages/{package_type}/{package_name}/versions/{package_version_id}"],
-    getPackageVersionForOrganization: ["GET /orgs/{org}/packages/{package_type}/{package_name}/versions/{package_version_id}"],
-    getPackageVersionForUser: ["GET /users/{username}/packages/{package_type}/{package_name}/versions/{package_version_id}"],
-    restorePackageForAuthenticatedUser: ["POST /user/packages/{package_type}/{package_name}/restore"],
-    restorePackageForOrg: ["POST /orgs/{org}/packages/{package_type}/{package_name}/restore"],
-    restorePackageVersionForAuthenticatedUser: ["POST /user/packages/{package_type}/{package_name}/versions/{package_version_id}/restore"],
-    restorePackageVersionForOrg: ["POST /orgs/{org}/packages/{package_type}/{package_name}/versions/{package_version_id}/restore"]
-  },
-  projects: {
-    addCollaborator: ["PUT /projects/{project_id}/collaborators/{username}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    createCard: ["POST /projects/columns/{column_id}/cards", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    createColumn: ["POST /projects/{project_id}/columns", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    createForAuthenticatedUser: ["POST /user/projects", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    createForOrg: ["POST /orgs/{org}/projects", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    createForRepo: ["POST /repos/{owner}/{repo}/projects", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    delete: ["DELETE /projects/{project_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    deleteCard: ["DELETE /projects/columns/cards/{card_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    deleteColumn: ["DELETE /projects/columns/{column_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    get: ["GET /projects/{project_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    getCard: ["GET /projects/columns/cards/{card_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    getColumn: ["GET /projects/columns/{column_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    getPermissionForUser: ["GET /projects/{project_id}/collaborators/{username}/permission", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    listCards: ["GET /projects/columns/{column_id}/cards", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    listCollaborators: ["GET /projects/{project_id}/collaborators", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    listColumns: ["GET /projects/{project_id}/columns", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    listForOrg: ["GET /orgs/{org}/projects", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    listForRepo: ["GET /repos/{owner}/{repo}/projects", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    listForUser: ["GET /users/{username}/projects", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    moveCard: ["POST /projects/columns/cards/{card_id}/moves", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    moveColumn: ["POST /projects/columns/{column_id}/moves", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    removeCollaborator: ["DELETE /projects/{project_id}/collaborators/{username}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    update: ["PATCH /projects/{project_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    updateCard: ["PATCH /projects/columns/cards/{card_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    updateColumn: ["PATCH /projects/columns/{column_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }]
-  },
-  pulls: {
-    checkIfMerged: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/merge"],
-    create: ["POST /repos/{owner}/{repo}/pulls"],
-    createReplyForReviewComment: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies"],
-    createReview: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews"],
-    createReviewComment: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/comments"],
-    deletePendingReview: ["DELETE /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}"],
-    deleteReviewComment: ["DELETE /repos/{owner}/{repo}/pulls/comments/{comment_id}"],
-    dismissReview: ["PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/dismissals"],
-    get: ["GET /repos/{owner}/{repo}/pulls/{pull_number}"],
-    getReview: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}"],
-    getReviewComment: ["GET /repos/{owner}/{repo}/pulls/comments/{comment_id}"],
-    list: ["GET /repos/{owner}/{repo}/pulls"],
-    listCommentsForReview: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/comments"],
-    listCommits: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/commits"],
-    listFiles: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/files"],
-    listRequestedReviewers: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers"],
-    listReviewComments: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/comments"],
-    listReviewCommentsForRepo: ["GET /repos/{owner}/{repo}/pulls/comments"],
-    listReviews: ["GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews"],
-    merge: ["PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge"],
-    removeRequestedReviewers: ["DELETE /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers"],
-    requestReviewers: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/requested_reviewers"],
-    submitReview: ["POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}/events"],
-    update: ["PATCH /repos/{owner}/{repo}/pulls/{pull_number}"],
-    updateBranch: ["PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch", {
-      mediaType: {
-        previews: ["lydian"]
-      }
-    }],
-    updateReview: ["PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}"],
-    updateReviewComment: ["PATCH /repos/{owner}/{repo}/pulls/comments/{comment_id}"]
-  },
-  rateLimit: {
-    get: ["GET /rate_limit"]
-  },
-  reactions: {
-    createForCommitComment: ["POST /repos/{owner}/{repo}/comments/{comment_id}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    createForIssue: ["POST /repos/{owner}/{repo}/issues/{issue_number}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    createForIssueComment: ["POST /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    createForPullRequestReviewComment: ["POST /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    createForTeamDiscussionCommentInOrg: ["POST /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    createForTeamDiscussionInOrg: ["POST /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    deleteForCommitComment: ["DELETE /repos/{owner}/{repo}/comments/{comment_id}/reactions/{reaction_id}", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    deleteForIssue: ["DELETE /repos/{owner}/{repo}/issues/{issue_number}/reactions/{reaction_id}", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    deleteForIssueComment: ["DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions/{reaction_id}", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    deleteForPullRequestComment: ["DELETE /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions/{reaction_id}", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    deleteForTeamDiscussion: ["DELETE /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/reactions/{reaction_id}", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    deleteForTeamDiscussionComment: ["DELETE /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}/reactions/{reaction_id}", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    deleteLegacy: ["DELETE /reactions/{reaction_id}", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }, {
-      deprecated: "octokit.reactions.deleteLegacy() is deprecated, see https://docs.github.com/rest/reference/reactions/#delete-a-reaction-legacy"
-    }],
-    listForCommitComment: ["GET /repos/{owner}/{repo}/comments/{comment_id}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    listForIssue: ["GET /repos/{owner}/{repo}/issues/{issue_number}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    listForIssueComment: ["GET /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    listForPullRequestReviewComment: ["GET /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    listForTeamDiscussionCommentInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }],
-    listForTeamDiscussionInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/reactions", {
-      mediaType: {
-        previews: ["squirrel-girl"]
-      }
-    }]
-  },
-  repos: {
-    acceptInvitation: ["PATCH /user/repository_invitations/{invitation_id}"],
-    addAppAccessRestrictions: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", {}, {
-      mapToData: "apps"
-    }],
-    addCollaborator: ["PUT /repos/{owner}/{repo}/collaborators/{username}"],
-    addStatusCheckContexts: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
-      mapToData: "contexts"
-    }],
-    addTeamAccessRestrictions: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams", {}, {
-      mapToData: "teams"
-    }],
-    addUserAccessRestrictions: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", {}, {
-      mapToData: "users"
-    }],
-    checkCollaborator: ["GET /repos/{owner}/{repo}/collaborators/{username}"],
-    checkVulnerabilityAlerts: ["GET /repos/{owner}/{repo}/vulnerability-alerts", {
-      mediaType: {
-        previews: ["dorian"]
-      }
-    }],
-    compareCommits: ["GET /repos/{owner}/{repo}/compare/{base}...{head}"],
-    createAnEnvironment: ["POST /repos/{owner}/{repo}/environments/{environment_name}"],
-    createCommitComment: ["POST /repos/{owner}/{repo}/commits/{commit_sha}/comments"],
-    createCommitSignatureProtection: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", {
-      mediaType: {
-        previews: ["zzzax"]
-      }
-    }],
-    createCommitStatus: ["POST /repos/{owner}/{repo}/statuses/{sha}"],
-    createDeployKey: ["POST /repos/{owner}/{repo}/keys"],
-    createDeployment: ["POST /repos/{owner}/{repo}/deployments"],
-    createDeploymentStatus: ["POST /repos/{owner}/{repo}/deployments/{deployment_id}/statuses"],
-    createDispatchEvent: ["POST /repos/{owner}/{repo}/dispatches"],
-    createForAuthenticatedUser: ["POST /user/repos"],
-    createFork: ["POST /repos/{owner}/{repo}/forks"],
-    createInOrg: ["POST /orgs/{org}/repos"],
-    createOrUpdateFileContents: ["PUT /repos/{owner}/{repo}/contents/{path}"],
-    createPagesSite: ["POST /repos/{owner}/{repo}/pages", {
-      mediaType: {
-        previews: ["switcheroo"]
-      }
-    }],
-    createRelease: ["POST /repos/{owner}/{repo}/releases"],
-    createUsingTemplate: ["POST /repos/{template_owner}/{template_repo}/generate", {
-      mediaType: {
-        previews: ["baptiste"]
-      }
-    }],
-    createWebhook: ["POST /repos/{owner}/{repo}/hooks"],
-    declineInvitation: ["DELETE /user/repository_invitations/{invitation_id}"],
-    delete: ["DELETE /repos/{owner}/{repo}"],
-    deleteAccessRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions"],
-    deleteAdminBranchProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins"],
-    deleteAnEnvironment: ["DELETE /repos/{owner}/{repo}/environments/{environment_name}"],
-    deleteBranchProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection"],
-    deleteCommitComment: ["DELETE /repos/{owner}/{repo}/comments/{comment_id}"],
-    deleteCommitSignatureProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", {
-      mediaType: {
-        previews: ["zzzax"]
-      }
-    }],
-    deleteDeployKey: ["DELETE /repos/{owner}/{repo}/keys/{key_id}"],
-    deleteDeployment: ["DELETE /repos/{owner}/{repo}/deployments/{deployment_id}"],
-    deleteFile: ["DELETE /repos/{owner}/{repo}/contents/{path}"],
-    deleteInvitation: ["DELETE /repos/{owner}/{repo}/invitations/{invitation_id}"],
-    deletePagesSite: ["DELETE /repos/{owner}/{repo}/pages", {
-      mediaType: {
-        previews: ["switcheroo"]
-      }
-    }],
-    deletePullRequestReviewProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews"],
-    deleteRelease: ["DELETE /repos/{owner}/{repo}/releases/{release_id}"],
-    deleteReleaseAsset: ["DELETE /repos/{owner}/{repo}/releases/assets/{asset_id}"],
-    deleteWebhook: ["DELETE /repos/{owner}/{repo}/hooks/{hook_id}"],
-    disableAutomatedSecurityFixes: ["DELETE /repos/{owner}/{repo}/automated-security-fixes", {
-      mediaType: {
-        previews: ["london"]
-      }
-    }],
-    disableVulnerabilityAlerts: ["DELETE /repos/{owner}/{repo}/vulnerability-alerts", {
-      mediaType: {
-        previews: ["dorian"]
-      }
-    }],
-    downloadArchive: ["GET /repos/{owner}/{repo}/zipball/{ref}", {}, {
-      renamed: ["repos", "downloadZipballArchive"]
-    }],
-    downloadTarballArchive: ["GET /repos/{owner}/{repo}/tarball/{ref}"],
-    downloadZipballArchive: ["GET /repos/{owner}/{repo}/zipball/{ref}"],
-    enableAutomatedSecurityFixes: ["PUT /repos/{owner}/{repo}/automated-security-fixes", {
-      mediaType: {
-        previews: ["london"]
-      }
-    }],
-    enableVulnerabilityAlerts: ["PUT /repos/{owner}/{repo}/vulnerability-alerts", {
-      mediaType: {
-        previews: ["dorian"]
-      }
-    }],
-    get: ["GET /repos/{owner}/{repo}"],
-    getAccessRestrictions: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/restrictions"],
-    getAdminBranchProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins"],
-    getAllEnvironments: ["GET /repos/{owner}/{repo}/environments"],
-    getAllStatusCheckContexts: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts"],
-    getAllTopics: ["GET /repos/{owner}/{repo}/topics", {
-      mediaType: {
-        previews: ["mercy"]
-      }
-    }],
-    getAppsWithAccessToProtectedBranch: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps"],
-    getBranch: ["GET /repos/{owner}/{repo}/branches/{branch}"],
-    getBranchProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection"],
-    getClones: ["GET /repos/{owner}/{repo}/traffic/clones"],
-    getCodeFrequencyStats: ["GET /repos/{owner}/{repo}/stats/code_frequency"],
-    getCollaboratorPermissionLevel: ["GET /repos/{owner}/{repo}/collaborators/{username}/permission"],
-    getCombinedStatusForRef: ["GET /repos/{owner}/{repo}/commits/{ref}/status"],
-    getCommit: ["GET /repos/{owner}/{repo}/commits/{ref}"],
-    getCommitActivityStats: ["GET /repos/{owner}/{repo}/stats/commit_activity"],
-    getCommitComment: ["GET /repos/{owner}/{repo}/comments/{comment_id}"],
-    getCommitSignatureProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_signatures", {
-      mediaType: {
-        previews: ["zzzax"]
-      }
-    }],
-    getCommunityProfileMetrics: ["GET /repos/{owner}/{repo}/community/profile"],
-    getContent: ["GET /repos/{owner}/{repo}/contents/{path}"],
-    getContributorsStats: ["GET /repos/{owner}/{repo}/stats/contributors"],
-    getDeployKey: ["GET /repos/{owner}/{repo}/keys/{key_id}"],
-    getDeployment: ["GET /repos/{owner}/{repo}/deployments/{deployment_id}"],
-    getDeploymentStatus: ["GET /repos/{owner}/{repo}/deployments/{deployment_id}/statuses/{status_id}"],
-    getEnvironment: ["GET /repos/{owner}/{repo}/environments/{environment_name}"],
-    getLatestPagesBuild: ["GET /repos/{owner}/{repo}/pages/builds/latest"],
-    getLatestRelease: ["GET /repos/{owner}/{repo}/releases/latest"],
-    getPages: ["GET /repos/{owner}/{repo}/pages"],
-    getPagesBuild: ["GET /repos/{owner}/{repo}/pages/builds/{build_id}"],
-    getParticipationStats: ["GET /repos/{owner}/{repo}/stats/participation"],
-    getPullRequestReviewProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews"],
-    getPunchCardStats: ["GET /repos/{owner}/{repo}/stats/punch_card"],
-    getReadme: ["GET /repos/{owner}/{repo}/readme"],
-    getRelease: ["GET /repos/{owner}/{repo}/releases/{release_id}"],
-    getReleaseAsset: ["GET /repos/{owner}/{repo}/releases/assets/{asset_id}"],
-    getReleaseByTag: ["GET /repos/{owner}/{repo}/releases/tags/{tag}"],
-    getStatusChecksProtection: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks"],
-    getTeamsWithAccessToProtectedBranch: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams"],
-    getTopPaths: ["GET /repos/{owner}/{repo}/traffic/popular/paths"],
-    getTopReferrers: ["GET /repos/{owner}/{repo}/traffic/popular/referrers"],
-    getUsersWithAccessToProtectedBranch: ["GET /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users"],
-    getViews: ["GET /repos/{owner}/{repo}/traffic/views"],
-    getWebhook: ["GET /repos/{owner}/{repo}/hooks/{hook_id}"],
-    getWebhookConfigForRepo: ["GET /repos/{owner}/{repo}/hooks/{hook_id}/config"],
-    listBranches: ["GET /repos/{owner}/{repo}/branches"],
-    listBranchesForHeadCommit: ["GET /repos/{owner}/{repo}/commits/{commit_sha}/branches-where-head", {
-      mediaType: {
-        previews: ["groot"]
-      }
-    }],
-    listCollaborators: ["GET /repos/{owner}/{repo}/collaborators"],
-    listCommentsForCommit: ["GET /repos/{owner}/{repo}/commits/{commit_sha}/comments"],
-    listCommitCommentsForRepo: ["GET /repos/{owner}/{repo}/comments"],
-    listCommitStatusesForRef: ["GET /repos/{owner}/{repo}/commits/{ref}/statuses"],
-    listCommits: ["GET /repos/{owner}/{repo}/commits"],
-    listContributors: ["GET /repos/{owner}/{repo}/contributors"],
-    listDeployKeys: ["GET /repos/{owner}/{repo}/keys"],
-    listDeploymentStatuses: ["GET /repos/{owner}/{repo}/deployments/{deployment_id}/statuses"],
-    listDeployments: ["GET /repos/{owner}/{repo}/deployments"],
-    listForAuthenticatedUser: ["GET /user/repos"],
-    listForOrg: ["GET /orgs/{org}/repos"],
-    listForUser: ["GET /users/{username}/repos"],
-    listForks: ["GET /repos/{owner}/{repo}/forks"],
-    listInvitations: ["GET /repos/{owner}/{repo}/invitations"],
-    listInvitationsForAuthenticatedUser: ["GET /user/repository_invitations"],
-    listLanguages: ["GET /repos/{owner}/{repo}/languages"],
-    listPagesBuilds: ["GET /repos/{owner}/{repo}/pages/builds"],
-    listPublic: ["GET /repositories"],
-    listPullRequestsAssociatedWithCommit: ["GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls", {
-      mediaType: {
-        previews: ["groot"]
-      }
-    }],
-    listReleaseAssets: ["GET /repos/{owner}/{repo}/releases/{release_id}/assets"],
-    listReleases: ["GET /repos/{owner}/{repo}/releases"],
-    listTags: ["GET /repos/{owner}/{repo}/tags"],
-    listTeams: ["GET /repos/{owner}/{repo}/teams"],
-    listWebhooks: ["GET /repos/{owner}/{repo}/hooks"],
-    merge: ["POST /repos/{owner}/{repo}/merges"],
-    pingWebhook: ["POST /repos/{owner}/{repo}/hooks/{hook_id}/pings"],
-    removeAppAccessRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", {}, {
-      mapToData: "apps"
-    }],
-    removeCollaborator: ["DELETE /repos/{owner}/{repo}/collaborators/{username}"],
-    removeStatusCheckContexts: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
-      mapToData: "contexts"
-    }],
-    removeStatusCheckProtection: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks"],
-    removeTeamAccessRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams", {}, {
-      mapToData: "teams"
-    }],
-    removeUserAccessRestrictions: ["DELETE /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", {}, {
-      mapToData: "users"
-    }],
-    renameBranch: ["POST /repos/{owner}/{repo}/branches/{branch}/rename"],
-    replaceAllTopics: ["PUT /repos/{owner}/{repo}/topics", {
-      mediaType: {
-        previews: ["mercy"]
-      }
-    }],
-    requestPagesBuild: ["POST /repos/{owner}/{repo}/pages/builds"],
-    setAdminBranchProtection: ["POST /repos/{owner}/{repo}/branches/{branch}/protection/enforce_admins"],
-    setAppAccessRestrictions: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/apps", {}, {
-      mapToData: "apps"
-    }],
-    setEnvironmentProtectionRules: ["PUT /repos/{owner}/{repo}/environments/{environment_name}"],
-    setStatusCheckContexts: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks/contexts", {}, {
-      mapToData: "contexts"
-    }],
-    setTeamAccessRestrictions: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/teams", {}, {
-      mapToData: "teams"
-    }],
-    setUserAccessRestrictions: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection/restrictions/users", {}, {
-      mapToData: "users"
-    }],
-    testPushWebhook: ["POST /repos/{owner}/{repo}/hooks/{hook_id}/tests"],
-    transfer: ["POST /repos/{owner}/{repo}/transfer"],
-    update: ["PATCH /repos/{owner}/{repo}"],
-    updateBranchProtection: ["PUT /repos/{owner}/{repo}/branches/{branch}/protection"],
-    updateCommitComment: ["PATCH /repos/{owner}/{repo}/comments/{comment_id}"],
-    updateInformationAboutPagesSite: ["PUT /repos/{owner}/{repo}/pages"],
-    updateInvitation: ["PATCH /repos/{owner}/{repo}/invitations/{invitation_id}"],
-    updatePullRequestReviewProtection: ["PATCH /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews"],
-    updateRelease: ["PATCH /repos/{owner}/{repo}/releases/{release_id}"],
-    updateReleaseAsset: ["PATCH /repos/{owner}/{repo}/releases/assets/{asset_id}"],
-    updateStatusCheckPotection: ["PATCH /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks", {}, {
-      renamed: ["repos", "updateStatusCheckProtection"]
-    }],
-    updateStatusCheckProtection: ["PATCH /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks"],
-    updateWebhook: ["PATCH /repos/{owner}/{repo}/hooks/{hook_id}"],
-    updateWebhookConfigForRepo: ["PATCH /repos/{owner}/{repo}/hooks/{hook_id}/config"],
-    uploadReleaseAsset: ["POST /repos/{owner}/{repo}/releases/{release_id}/assets{?name,label}", {
-      baseUrl: "https://uploads.github.com"
-    }]
-  },
-  search: {
-    code: ["GET /search/code"],
-    commits: ["GET /search/commits", {
-      mediaType: {
-        previews: ["cloak"]
-      }
-    }],
-    issuesAndPullRequests: ["GET /search/issues"],
-    labels: ["GET /search/labels"],
-    repos: ["GET /search/repositories"],
-    topics: ["GET /search/topics", {
-      mediaType: {
-        previews: ["mercy"]
-      }
-    }],
-    users: ["GET /search/users"]
-  },
-  secretScanning: {
-    getAlert: ["GET /repos/{owner}/{repo}/secret-scanning/alerts/{alert_number}"],
-    listAlertsForRepo: ["GET /repos/{owner}/{repo}/secret-scanning/alerts"],
-    updateAlert: ["PATCH /repos/{owner}/{repo}/secret-scanning/alerts/{alert_number}"]
-  },
-  teams: {
-    addOrUpdateMembershipForUserInOrg: ["PUT /orgs/{org}/teams/{team_slug}/memberships/{username}"],
-    addOrUpdateProjectPermissionsInOrg: ["PUT /orgs/{org}/teams/{team_slug}/projects/{project_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    addOrUpdateRepoPermissionsInOrg: ["PUT /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}"],
-    checkPermissionsForProjectInOrg: ["GET /orgs/{org}/teams/{team_slug}/projects/{project_id}", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    checkPermissionsForRepoInOrg: ["GET /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}"],
-    create: ["POST /orgs/{org}/teams"],
-    createDiscussionCommentInOrg: ["POST /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments"],
-    createDiscussionInOrg: ["POST /orgs/{org}/teams/{team_slug}/discussions"],
-    deleteDiscussionCommentInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}"],
-    deleteDiscussionInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}"],
-    deleteInOrg: ["DELETE /orgs/{org}/teams/{team_slug}"],
-    getByName: ["GET /orgs/{org}/teams/{team_slug}"],
-    getDiscussionCommentInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}"],
-    getDiscussionInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}"],
-    getMembershipForUserInOrg: ["GET /orgs/{org}/teams/{team_slug}/memberships/{username}"],
-    list: ["GET /orgs/{org}/teams"],
-    listChildInOrg: ["GET /orgs/{org}/teams/{team_slug}/teams"],
-    listDiscussionCommentsInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments"],
-    listDiscussionsInOrg: ["GET /orgs/{org}/teams/{team_slug}/discussions"],
-    listForAuthenticatedUser: ["GET /user/teams"],
-    listMembersInOrg: ["GET /orgs/{org}/teams/{team_slug}/members"],
-    listPendingInvitationsInOrg: ["GET /orgs/{org}/teams/{team_slug}/invitations"],
-    listProjectsInOrg: ["GET /orgs/{org}/teams/{team_slug}/projects", {
-      mediaType: {
-        previews: ["inertia"]
-      }
-    }],
-    listReposInOrg: ["GET /orgs/{org}/teams/{team_slug}/repos"],
-    removeMembershipForUserInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/memberships/{username}"],
-    removeProjectInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/projects/{project_id}"],
-    removeRepoInOrg: ["DELETE /orgs/{org}/teams/{team_slug}/repos/{owner}/{repo}"],
-    updateDiscussionCommentInOrg: ["PATCH /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}/comments/{comment_number}"],
-    updateDiscussionInOrg: ["PATCH /orgs/{org}/teams/{team_slug}/discussions/{discussion_number}"],
-    updateInOrg: ["PATCH /orgs/{org}/teams/{team_slug}"]
-  },
-  users: {
-    addEmailForAuthenticated: ["POST /user/emails"],
-    block: ["PUT /user/blocks/{username}"],
-    checkBlocked: ["GET /user/blocks/{username}"],
-    checkFollowingForUser: ["GET /users/{username}/following/{target_user}"],
-    checkPersonIsFollowedByAuthenticated: ["GET /user/following/{username}"],
-    createGpgKeyForAuthenticated: ["POST /user/gpg_keys"],
-    createPublicSshKeyForAuthenticated: ["POST /user/keys"],
-    deleteEmailForAuthenticated: ["DELETE /user/emails"],
-    deleteGpgKeyForAuthenticated: ["DELETE /user/gpg_keys/{gpg_key_id}"],
-    deletePublicSshKeyForAuthenticated: ["DELETE /user/keys/{key_id}"],
-    follow: ["PUT /user/following/{username}"],
-    getAuthenticated: ["GET /user"],
-    getByUsername: ["GET /users/{username}"],
-    getContextForUser: ["GET /users/{username}/hovercard"],
-    getGpgKeyForAuthenticated: ["GET /user/gpg_keys/{gpg_key_id}"],
-    getPublicSshKeyForAuthenticated: ["GET /user/keys/{key_id}"],
-    list: ["GET /users"],
-    listBlockedByAuthenticated: ["GET /user/blocks"],
-    listEmailsForAuthenticated: ["GET /user/emails"],
-    listFollowedByAuthenticated: ["GET /user/following"],
-    listFollowersForAuthenticatedUser: ["GET /user/followers"],
-    listFollowersForUser: ["GET /users/{username}/followers"],
-    listFollowingForUser: ["GET /users/{username}/following"],
-    listGpgKeysForAuthenticated: ["GET /user/gpg_keys"],
-    listGpgKeysForUser: ["GET /users/{username}/gpg_keys"],
-    listPublicEmailsForAuthenticated: ["GET /user/public_emails"],
-    listPublicKeysForUser: ["GET /users/{username}/keys"],
-    listPublicSshKeysForAuthenticated: ["GET /user/keys"],
-    setPrimaryEmailVisibilityForAuthenticated: ["PATCH /user/email/visibility"],
-    unblock: ["DELETE /user/blocks/{username}"],
-    unfollow: ["DELETE /user/following/{username}"],
-    updateAuthenticated: ["PATCH /user"]
-  }
-};
-
-const VERSION = "4.13.0";
-
-function endpointsToMethods(octokit, endpointsMap) {
-  const newMethods = {};
-
-  for (const [scope, endpoints] of Object.entries(endpointsMap)) {
-    for (const [methodName, endpoint] of Object.entries(endpoints)) {
-      const [route, defaults, decorations] = endpoint;
-      const [method, url] = route.split(/ /);
-      const endpointDefaults = Object.assign({
-        method,
-        url
-      }, defaults);
-
-      if (!newMethods[scope]) {
-        newMethods[scope] = {};
-      }
-
-      const scopeMethods = newMethods[scope];
-
-      if (decorations) {
-        scopeMethods[methodName] = decorate(octokit, scope, methodName, endpointDefaults, decorations);
-        continue;
-      }
-
-      scopeMethods[methodName] = octokit.request.defaults(endpointDefaults);
-    }
-  }
-
-  return newMethods;
-}
-
-function decorate(octokit, scope, methodName, defaults, decorations) {
-  const requestWithDefaults = octokit.request.defaults(defaults);
-  /* istanbul ignore next */
-
-  function withDecorations(...args) {
-    // @ts-ignore https://github.com/microsoft/TypeScript/issues/25488
-    let options = requestWithDefaults.endpoint.merge(...args); // There are currently no other decorations than `.mapToData`
-
-    if (decorations.mapToData) {
-      options = Object.assign({}, options, {
-        data: options[decorations.mapToData],
-        [decorations.mapToData]: undefined
-      });
-      return requestWithDefaults(options);
-    }
-
-    if (decorations.renamed) {
-      const [newScope, newMethodName] = decorations.renamed;
-      octokit.log.warn(`octokit.${scope}.${methodName}() has been renamed to octokit.${newScope}.${newMethodName}()`);
-    }
-
-    if (decorations.deprecated) {
-      octokit.log.warn(decorations.deprecated);
-    }
-
-    if (decorations.renamedParameters) {
-      // @ts-ignore https://github.com/microsoft/TypeScript/issues/25488
-      const options = requestWithDefaults.endpoint.merge(...args);
-
-      for (const [name, alias] of Object.entries(decorations.renamedParameters)) {
-        if (name in options) {
-          octokit.log.warn(`"${name}" parameter is deprecated for "octokit.${scope}.${methodName}()". Use "${alias}" instead`);
-
-          if (!(alias in options)) {
-            options[alias] = options[name];
-          }
-
-          delete options[name];
-        }
-      }
-
-      return requestWithDefaults(options);
-    } // @ts-ignore https://github.com/microsoft/TypeScript/issues/25488
-
-
-    return requestWithDefaults(...args);
-  }
-
-  return Object.assign(withDecorations, requestWithDefaults);
-}
-
-function restEndpointMethods(octokit) {
-  return endpointsToMethods(octokit, Endpoints);
-}
-restEndpointMethods.VERSION = VERSION;
-
-exports.restEndpointMethods = restEndpointMethods;
-//# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 537:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
-
-var deprecation = __nccwpck_require__(8932);
-var once = _interopDefault(__nccwpck_require__(1223));
-
-const logOnce = once(deprecation => console.warn(deprecation));
-/**
- * Error with extra properties to help with debugging
- */
-
-class RequestError extends Error {
-  constructor(message, statusCode, options) {
-    super(message); // Maintains proper stack trace (only available on V8)
-
-    /* istanbul ignore next */
-
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, this.constructor);
-    }
-
-    this.name = "HttpError";
-    this.status = statusCode;
-    Object.defineProperty(this, "code", {
-      get() {
-        logOnce(new deprecation.Deprecation("[@octokit/request-error] `error.code` is deprecated, use `error.status`."));
-        return statusCode;
-      }
-
-    });
-    this.headers = options.headers || {}; // redact request credentials without mutating original request options
-
-    const requestCopy = Object.assign({}, options.request);
-
-    if (options.request.headers.authorization) {
-      requestCopy.headers = Object.assign({}, options.request.headers, {
-        authorization: options.request.headers.authorization.replace(/ .*$/, " [REDACTED]")
-      });
-    }
-
-    requestCopy.url = requestCopy.url // client_id & client_secret can be passed as URL query parameters to increase rate limit
-    // see https://developer.github.com/v3/#increasing-the-unauthenticated-rate-limit-for-oauth-applications
-    .replace(/\bclient_secret=\w+/g, "client_secret=[REDACTED]") // OAuth tokens can be passed as URL query parameters, although it is not recommended
-    // see https://developer.github.com/v3/#oauth2-token-sent-in-a-header
-    .replace(/\baccess_token=\w+/g, "access_token=[REDACTED]");
-    this.request = requestCopy;
-  }
-
-}
-
-exports.RequestError = RequestError;
-//# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 6234:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
-
-var endpoint = __nccwpck_require__(9440);
-var universalUserAgent = __nccwpck_require__(5030);
-var isPlainObject = __nccwpck_require__(3287);
-var nodeFetch = _interopDefault(__nccwpck_require__(467));
-var requestError = __nccwpck_require__(537);
-
-const VERSION = "5.4.14";
-
-function getBufferResponse(response) {
-  return response.arrayBuffer();
-}
-
-function fetchWrapper(requestOptions) {
-  if (isPlainObject.isPlainObject(requestOptions.body) || Array.isArray(requestOptions.body)) {
-    requestOptions.body = JSON.stringify(requestOptions.body);
-  }
-
-  let headers = {};
-  let status;
-  let url;
-  const fetch = requestOptions.request && requestOptions.request.fetch || nodeFetch;
-  return fetch(requestOptions.url, Object.assign({
-    method: requestOptions.method,
-    body: requestOptions.body,
-    headers: requestOptions.headers,
-    redirect: requestOptions.redirect
-  }, requestOptions.request)).then(response => {
-    url = response.url;
-    status = response.status;
-
-    for (const keyAndValue of response.headers) {
-      headers[keyAndValue[0]] = keyAndValue[1];
-    }
-
-    if (status === 204 || status === 205) {
-      return;
-    } // GitHub API returns 200 for HEAD requests
-
-
-    if (requestOptions.method === "HEAD") {
-      if (status < 400) {
-        return;
-      }
-
-      throw new requestError.RequestError(response.statusText, status, {
-        headers,
-        request: requestOptions
-      });
-    }
-
-    if (status === 304) {
-      throw new requestError.RequestError("Not modified", status, {
-        headers,
-        request: requestOptions
-      });
-    }
-
-    if (status >= 400) {
-      return response.text().then(message => {
-        const error = new requestError.RequestError(message, status, {
-          headers,
-          request: requestOptions
-        });
-
-        try {
-          let responseBody = JSON.parse(error.message);
-          Object.assign(error, responseBody);
-          let errors = responseBody.errors; // Assumption `errors` would always be in Array format
-
-          error.message = error.message + ": " + errors.map(JSON.stringify).join(", ");
-        } catch (e) {// ignore, see octokit/rest.js#684
-        }
-
-        throw error;
-      });
-    }
-
-    const contentType = response.headers.get("content-type");
-
-    if (/application\/json/.test(contentType)) {
-      return response.json();
-    }
-
-    if (!contentType || /^text\/|charset=utf-8$/.test(contentType)) {
-      return response.text();
-    }
-
-    return getBufferResponse(response);
-  }).then(data => {
-    return {
-      status,
-      url,
-      headers,
-      data
-    };
-  }).catch(error => {
-    if (error instanceof requestError.RequestError) {
-      throw error;
-    }
-
-    throw new requestError.RequestError(error.message, 500, {
-      headers,
-      request: requestOptions
-    });
-  });
-}
-
-function withDefaults(oldEndpoint, newDefaults) {
-  const endpoint = oldEndpoint.defaults(newDefaults);
-
-  const newApi = function (route, parameters) {
-    const endpointOptions = endpoint.merge(route, parameters);
-
-    if (!endpointOptions.request || !endpointOptions.request.hook) {
-      return fetchWrapper(endpoint.parse(endpointOptions));
-    }
-
-    const request = (route, parameters) => {
-      return fetchWrapper(endpoint.parse(endpoint.merge(route, parameters)));
-    };
-
-    Object.assign(request, {
-      endpoint,
-      defaults: withDefaults.bind(null, endpoint)
-    });
-    return endpointOptions.request.hook(request, endpointOptions);
-  };
-
-  return Object.assign(newApi, {
-    endpoint,
-    defaults: withDefaults.bind(null, endpoint)
-  });
-}
-
-const request = withDefaults(endpoint.endpoint, {
-  headers: {
-    "user-agent": `octokit-request.js/${VERSION} ${universalUserAgent.getUserAgent()}`
-  }
-});
-
-exports.request = request;
-//# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 9058:
-/***/ ((module) => {
-
-"use strict";
-
-
-class AigleCore {
-  constructor() {}
-}
-
-class AigleProxy {
-  constructor() {}
-}
-
-module.exports = { AigleCore, AigleProxy };
-
-
-/***/ }),
-
-/***/ 5306:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleCore, AigleProxy } = __nccwpck_require__(9058);
-
-const Queue = __nccwpck_require__(9456);
-const invokeAsync = __nccwpck_require__(2335);
-const {
-  VERSION,
-  INTERNAL,
-  PENDING,
-  UNHANDLED,
-  errorObj,
-  call0,
-  callResolve,
-  callReject,
-  callReceiver,
-  printWarning
-} = __nccwpck_require__(1783);
-let stackTraces = false;
-
-class Aigle extends AigleCore {
-  /**
-   * Create a new promise instance. It is same as native Promise.
-   * It has three states, `pending`, `fulfilled` and `rejected`, the first state is `pending`.
-   * The passed function has `resolve` and `reject` as the arguments,
-   * if `reject` is called or an error is caused, the state goes to `rejected` and then the error is thrown to next `catch`.
-   * If request is success and `resolve` is called, `then` or next task is called.
-   * @param {Function} executor
-   * @example
-   * return new Promise((resolve, reject) => {
-   *   fs.readFile('filepath', (err, data) => {
-   *     if (err) {
-   *       return reject(err);
-   *    }
-   *    resolve(data);
-   *  });
-   * })
-   * .then(data => ...)
-   * .catch(err => ...);
-   */
-  constructor(executor) {
-    super();
-    this._resolved = 0;
-    this._value = undefined;
-    this._key = undefined;
-    this._receiver = undefined;
-    this._onFulfilled = undefined;
-    this._onRejected = undefined;
-    this._receivers = undefined;
-    if (executor === INTERNAL) {
-      return;
-    }
-    this._execute(executor);
-  }
-
-  /**
-   * @param {Function} onFulfilled
-   * @param {Function} [onRejected]
-   * @return {Aigle} Returns an Aigle instance
-   */
-  then(onFulfilled, onRejected) {
-    return addAigle(this, new Aigle(INTERNAL), onFulfilled, onRejected);
-  }
-
-  /**
-   * @param {Object|Function} onRejected
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * return Aigle.reject(new TypeError('error'))
-   *   .catch(TypeError, error => console.log(error));
-   */
-  catch(onRejected) {
-    if (arguments.length > 1) {
-      let l = arguments.length;
-      onRejected = arguments[--l];
-      if (typeof onRejected === 'function') {
-        const errorTypes = Array(l);
-        while (l--) {
-          errorTypes[l] = arguments[l];
-        }
-        onRejected = createOnRejected(errorTypes, onRejected);
-      }
-    }
-    return addAigle(this, new Aigle(INTERNAL), undefined, onRejected);
-  }
-
-  /**
-   * @param {Function} handler
-   * @return {Aigle} Returns an Aigle instance
-   */
-  finally(handler) {
-    handler = typeof handler !== 'function' ? handler : createFinallyHandler(this, handler);
-    return addAigle(this, new Aigle(INTERNAL), handler, handler);
-  }
-
-  /**
-   * @return {string}
-   */
-  toString() {
-    return '[object Promise]';
-  }
-
-  /**
-   * @return {boolean}
-   */
-  isPending() {
-    return this._resolved === 0;
-  }
-
-  /**
-   * @return {boolean}
-   */
-  isFulfilled() {
-    return this._resolved === 1;
-  }
-
-  /**
-   * @return {boolean}
-   */
-  isRejected() {
-    return this._resolved === 2;
-  }
-
-  /**
-   * @return {boolean}
-   */
-  isCancelled() {
-    return this._value instanceof CancellationError;
-  }
-
-  /**
-   * @return {*}
-   */
-  value() {
-    return this._resolved === 1 ? this._value : undefined;
-  }
-
-  /**
-   * @return {*}
-   */
-  reason() {
-    return this._resolved === 2 ? this._value : undefined;
-  }
-
-  /**
-   * @example
-   * const { CancellationError } = Aigle;
-   * let cancelled = false;
-   * const promise = new Aigle((resolve, reject, onCancel) => {
-   *   setTimeout(resolve, 30, 'resolved');
-   *   onCancel(() => cancelled = true);
-   * });
-   * promise.cancel();
-   * promise.catch(error => {
-   *   console.log(error instanceof CancellationError); // true
-   *   console.log(cancelled); // true
-   * });
-   */
-  cancel() {
-    if (this._execute === execute || this._resolved !== 0) {
-      return;
-    }
-    const { _onCancelQueue } = this;
-    if (_onCancelQueue) {
-      let i = -1;
-      const { array } = _onCancelQueue;
-      this._onCancelQueue = undefined;
-      while (++i < _onCancelQueue.length) {
-        array[i]();
-      }
-    }
-    this._resolved = 2;
-    this._value = new CancellationError('late cancellation observer');
-    if (this._parent) {
-      this._parent.cancel();
-    }
-  }
-
-  suppressUnhandledRejections() {
-    this._receiver = INTERNAL;
-  }
-
-  /**
-   * @param {Function} handler
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const array = [1, 2, 3];
-   * Aigle.resolve(array)
-   *   .spread((arg1, arg2, arg3) => {
-   *     console.log(arg1, arg2, arg3); // 1, 2, 3
-   *   });
-   *
-   * @example
-   * const string = '123';
-   * Aigle.resolve(string)
-   *   .spread((arg1, arg2, arg3) => {
-   *     console.log(arg1, arg2, arg3); // 1, 2, 3
-   *   });
-   */
-  spread(handler) {
-    return addReceiver(this, new Spread(handler));
-  }
-
-  /**
-   * `Aigle#all` will execute [`Aigle.all`](https://suguru03.github.io/aigle/docs/global.html#all) using a previous promise value.
-   * The value will be assigned as the first argument to [`Aigle.all`](https://suguru03.github.io/aigle/docs/global.html#all).
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const makeDelay = (num, delay) => {
-   *   return Aigle.delay(delay)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve([
-   *   makeDelay(1, 30),
-   *   makeDelay(2, 20),
-   *   makeDelay(3, 10)
-   * ])
-   * .all()
-   * .then(array => {
-   *   console.log(array); // [1, 2, 3];
-   *   console.log(order); // [3, 2, 1];
-   * });
-   */
-  all() {
-    return addProxy(this, All);
-  }
-
-  allSettled() {
-    return addProxy(this, AllSettled);
-  }
-
-  /**
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * Aigle.resolve([
-   *   new Aigle(resolve => setTimeout(() => resolve(1), 30)),
-   *   new Aigle(resolve => setTimeout(() => resolve(2), 20)),
-   *   new Aigle(resolve => setTimeout(() => resolve(3), 10))
-   * ])
-   * .race()
-   * .then(value => console.log(value)); // 3
-   */
-  race() {
-    return addProxy(this, Race);
-  }
-
-  /**
-   * `Aigle#props` will execute [`Aigle.props`](https://suguru03.github.io/aigle/docs/global.html#props) using a previous promise value.
-   * The value will be assigned as the first argument to [`Aigle.props`](https://suguru03.github.io/aigle/docs/global.html#props).
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const makeDelay = (num, delay) => {
-   *   return Aigle.delay(delay)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve({
-   *   a: makeDelay(1, 30),
-   *   b: makeDelay(2, 20),
-   *   c: makeDelay(3, 10)
-   * })
-   * .props()
-   * .then(object => {
-   *   console.log(object); // { a: 1, b: 2, c: 3 }
-   *   console.log(order); // [3, 2, 1]
-   * });
-   */
-  props() {
-    return addProxy(this, Props);
-  }
-
-  /**
-   * `Aigle#parallel` will execute [`Aigle.parallel`](https://suguru03.github.io/aigle/docs/global.html#parallel) using a previous promise value.
-   * The value will be assigned as the first argument to [`Aigle.parallel`](https://suguru03.github.io/aigle/docs/global.html#parallel).
-   * @example
-   *   Aigle.resolve([
-   *     () => Aigle.delay(30, 1),
-   *     Aigle.delay(20, 2),
-   *     3
-   *   ])
-   *   .parallel()
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 3]
-   *   });
-   *
-   * @example
-   *   Aigle.resolve({
-   *     a: () => Aigle.delay(30, 1),
-   *     b: Aigle.delay(20, 2),
-   *     c: 3
-   *   })
-   *   .parallel()
-   *   .then(object => {
-   *     console.log(object); // { a: 1, b: 2, c: 3 }
-   *   });
-   */
-  parallel() {
-    return addProxy(this, Parallel);
-  }
-
-  /**
-   * `Aigle#series` has the same functionality as [`Aigle#parallel`](https://suguru03.github.io/aigle/docs/Aigle.html#parallel)
-   * and it works in series.
-   * @example
-   *   Aigle.resolve([
-   *     () => Aigle.delay(30, 1),
-   *     Aigle.delay(20, 2),
-   *     3
-   *   ])
-   *   .series()
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 3]
-   *   });
-   *
-   * @example
-   *   Aigle.resolve({
-   *     a: () => Aigle.delay(30, 1),
-   *     b: Aigle.delay(20, 2),
-   *     c: 3
-   *   })
-   *   .series()
-   *   .then(object => {
-   *     console.log(object); // { a: 1, b: 2, c: 3 }
-   *   });
-   */
-  series() {
-    return addProxy(this, Series);
-  }
-
-  /**
-   * `Aigle#parallelLimit` has the same functionality as [`Aigle#parallel`](https://suguru03.github.io/aigle/docs/Aigle.html#parallel)
-   * and it works with concurrency.
-   * @param {number} [limit=8]
-   * @example
-   *   Aigle.resolve([
-   *     () => Aigle.delay(30, 1),
-   *     Aigle.delay(20, 2),
-   *     3
-   *   ])
-   *   .parallelLimit()
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 3]
-   *   });
-   *
-   * @example
-   *   Aigle.resolve({
-   *     a: () => Aigle.delay(30, 1),
-   *     b: Aigle.delay(20, 2),
-   *     c: 3
-   *   })
-   *   .parallelLimit(2)
-   *   .then(object => {
-   *     console.log(object); // { a: 1, b: 2, c: 3 }
-   *   });
-   */
-  parallelLimit(limit) {
-    return addProxy(this, ParallelLimit, limit);
-  }
-
-  /**
-   * `Aigle#each` will execute [`Aigle.each`](https://suguru03.github.io/aigle/docs/global.html#each) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.each`](https://suguru03.github.io/aigle/docs/global.html#each) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function} iterator
-   * @example
-   *   const order = [];
-   *   const collection = [1, 4, 2];
-   *   const iterator = (num, value, collection) => {
-   *     return Aigle.delay(num * 10)
-   *       .then(() => order.push(num));
-   *   };
-   *   return Aigle.resolve(collection)
-   *     .each(iterator)
-   *     .then(value => {
-   *       console.log(value); // undefined
-   *       console.log(order); // [1, 2, 4];
-   *     });
-   *
-   * @example
-   *   const order = [];
-   *   const collection = { a: 1, b: 4, c: 2 };
-   *   const iterator = (num, key, collection) => {
-   *     return Aigle.delay(num * 10)
-   *       .then(() => order.push(num));
-   *   };
-   *   return Aigle.resolve(collection)
-   *     .each(iterator)
-   *     .then(value => {
-   *       console.log(value); // undefined
-   *       console.log(order); // [1, 2, 4];
-   *     });
-   *
-   * @example
-   *   const order = [];
-   *   const collection = [1, 4, 2];
-   *   const iterator = (num, value, collection) => {
-   *     return Aigle.delay(num * 10)
-   *       .then(() => {
-   *         order.push(num);
-   *         return num !== 2; // break
-   *       });
-   *   };
-   *   return Aigle.resolve(collection)
-   *     .each(iterator)
-   *     .then(value => {
-   *       console.log(value); // undefined
-   *       console.log(order); // [1, 2];
-   *     });
-   */
-  each(iterator) {
-    return addProxy(this, Each, iterator);
-  }
-
-  /**
-   * @alias each
-   * @param {Function} iterator
-   */
-  forEach(iterator) {
-    return addProxy(this, Each, iterator);
-  }
-
-  /**
-   * `Aigle#eachSeries` is almost the same as [`Aigle#each`](https://suguru03.github.io/aigle/docs/Aigle.html#each), but it will work in series.
-   * @param {Function} iterator
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => order.push(num));
-   * };
-   * Aigle.resolve(collection)
-   *   .eachSeries(iterator)
-   *   .then(value => {
-   *     console.log(value); // undefined
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, index, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => order.push(num));
-   * };
-   * Aigle.resolve(collection)
-   *   .eachSeries(iterator)
-   *   .then(value => {
-   *     console.log(value); // undefined
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num !== 4; // break
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .eachSeries(iterator)
-   *   .then(value => {
-   *     console.log(value); // undefined
-   *     console.log(order); // [1, 4];
-   *   });
-   */
-  eachSeries(iterator) {
-    return addProxy(this, EachSeries, iterator);
-  }
-
-  /**
-   * @alias eachSeries
-   * @param {Function} iterator
-   */
-  forEachSeries(iterator) {
-    return addProxy(this, EachSeries, iterator);
-  }
-
-  /**
-   * `Aigle#eachLimit` is almost the same as [`Aigle.each`](https://suguru03.github.io/aigle/docs/Aigle.html#each) and
-   * [`Aigle.eachSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#eachSeries), but it will work with concurrency.
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const collection = [1, 5, 3, 4, 2];
-   * return Aigle.resolve(collection)
-   *   .eachLimit(2, (num, index, collection) => {
-   *     return new Aigle(resolve => setTimeout(() => {
-   *       console.log(num); // 1, 3, 5, 2, 4
-   *       resolve(num);
-   *     }, num * 10));
-   *   });
-   *
-   * @example
-   * const collection = [1, 5, 3, 4, 2];
-   * return Aigle.resolve(collection)
-   *   .eachLimit((num, index, collection) => {
-   *     return new Aigle(resolve => setTimeout(() => {
-   *       console.log(num); // 1, 2, 3, 4, 5
-   *       resolve(num);
-   *     }, num * 10));
-   *   });
-   */
-  eachLimit(limit, iterator) {
-    return addProxy(this, EachLimit, limit, iterator);
-  }
-
-  /**
-   * @alias eachLimit
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   */
-  forEachLimit(limit, iterator) {
-    return addProxy(this, EachLimit, limit, iterator);
-  }
-
-  /**
-   * `Aigle#map` will execute [`Aigle.map`](https://suguru03.github.io/aigle/docs/global.html#map) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.map`](https://suguru03.github.io/aigle/docs/global.html#map) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|string} iterator - if you define string, you can use shorthand which is similar to lodash
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .map(iterator)
-   *   .then(array => {
-   *     console.log(array); // [2, 8, 4]
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .map(iterator)
-   *   .then(array => {
-   *     console.log(array); // [2, 8, 4]
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *  uid: 1, name: 'test1'
-   * }, {
-   *  uid: 4, name: 'test4'
-   * }, {
-   *  uid: 2, name: 'test2'
-   * }];
-   * Aigle.resolve(collection)
-   *   .map('uid')
-   *   .then(uids => console.log(uids)); // [1, 4, 2]
-   *
-   * @example
-   * const collection = {
-   *   task1: { uid: 1, name: 'test1' },
-   *   task2: { uid: 4, name: 'test4' },
-   *   task3: { uid: 2, name: 'test2' }
-   * }];
-   * Aigle.resolve(collection)
-   *   .map('uid')
-   *   .then(uids => console.log(uids)); // [1, 4, 2]
-   */
-  map(iterator) {
-    return addProxy(this, Map, iterator);
-  }
-
-  /**
-   * `Aigle#mapSeries` is almost the same as [`Aigle#map`](https://suguru03.github.io/aigle/docs/Aigle.html#map), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapSeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [2, 8, 4]
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapSeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [2, 8, 4]
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   */
-  mapSeries(iterator) {
-    return addProxy(this, MapSeries, iterator);
-  }
-
-  /**
-   * `Aigle#mapLimit` is almost the same as [`Aigle#map`](https://suguru03.github.io/aigle/docs/Aigle.html#map)
-   * and [`Aigle#mapSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#mapSeries)), but it will work with concurrency.
-   * @param {integer} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [2, 10, 6, 8, 4];
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = {
-   *   task1: 1,
-   *   task2: 5,
-   *   task3: 3,
-   *   task4: 4,
-   *   task5: 2
-   * };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [2, 10, 6, 8, 4];
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapLimit(iterator)
-   *   .then(array => {
-   *     console.log(array); // [2, 10, 6, 8, 4];
-   *     console.log(order); // [1, 2, 3, 4, 5];
-   *   });
-   */
-  mapLimit(limit, iterator) {
-    return addProxy(this, MapLimit, limit, iterator);
-  }
-
-  /**
-   * `Aigle#mapValues` will execute [`Aigle.mapValues`](https://suguru03.github.io/aigle/docs/global.html#mapValues) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.mapValues`](https://suguru03.github.io/aigle/docs/global.html#mapValues) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|string} iterator - if you define string, you can use shorthand which is similar to lodash
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapValues(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': 2, '1': 8, '2': 4 }
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapValues(iterator)
-   *   .then(object => {
-   *     console.log(object); // { a: 2, b: 8, c: 4 }
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *  uid: 1, name: 'test1'
-   * }, {
-   *  uid: 4, name: 'test4'
-   * }, {
-   *  uid: 2, name: 'test2'
-   * }];
-   * Aigle.resolve(collection)
-   *   .mapValues('uid')
-   *   .then(uids => console.log(uids)); // { '0': 1, '1': 4, '2': 2 }
-   *
-   * @example
-   * const collection = {
-   *   task1: { uid: 1, name: 'test1' },
-   *   task2: { uid: 4, name: 'test4' },
-   *   task3: { uid: 2, name: 'test2' }
-   * }];
-   * Aigle.resolve(collection)
-   *   .mapValues('uid')
-   *   .then(uids => console.log(uids)); // { task1: 1, task2: 4, task3: 2 }
-   */
-  mapValues(iterator) {
-    return addProxy(this, MapValues, iterator);
-  }
-
-  /**
-   * `Aigle#mapValuesSeries` is almost the same as [`Aigle#mapValues`](https://suguru03.github.io/aigle/docs/Aigle.html#mapValues), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapValuesSeries(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': 2, '1': 8, '2': 4 }
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapValuesSeries(iterator)
-   *   .then(object => {
-   *     console.log(object); // { a: 2, b: 8, c: 4 }
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   */
-  mapValuesSeries(iterator) {
-    return addProxy(this, MapValuesSeries, iterator);
-  }
-
-  /**
-   * `Aigle#mapValuesLimit` is almost the same as [`Aigle#mapValues`](https://suguru03.github.io/aigle/docs/Aigle.html#mapValues)
-   * and [`Aigle#mapValuesSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#mapValuesSeries)), but it will work with concurrency.
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapValuesLimit(2, iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': 2, '1': 10, '2': 6, '3': 8, '4': 4 }
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapValuesLimit(2, iterator)
-   *   .then(object => {
-   *     console.log(object); // { a: 2, b: 10, c: 6, d: 8, e: 4 }
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .mapValuesLimit(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': 2, '1': 10, '2': 6, '3': 8, '4': 4 }
-   *     console.log(order); // [1, 2, 3, 4, 5]
-   *   });
-   */
-  mapValuesLimit(limit, iterator) {
-    return addProxy(this, MapValuesLimit, limit, iterator);
-  }
-
-  /**
-   * `Aigle#filter` will execute [`Aigle.filter`](https://suguru03.github.io/aigle/docs/global.html#filter) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.filter`](https://suguru03.github.io/aigle/docs/global.html#filter) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|Array|Object|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .filter(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1];
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .filter(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1];
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .filter('active')
-   *   .then(array => {
-   *     console.log(array); // [{ name: 'fread', active: true }]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .filter(['name', 'fread'])
-   *   .then(array => {
-   *     console.log(array); // [{ name: 'fread', active: true }]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .filter({ name: 'fread', active: true })
-   *   .then(array => {
-   *     console.log(array); // [{ name: 'fread', active: true }]
-   *   });
-   */
-  filter(iterator) {
-    return addProxy(this, Filter, iterator);
-  }
-
-  /**
-   * `Aigle#filterSeries` is almost the same as [`Aigle#filter`](https://suguru03.github.io/aigle/docs/Aigle.html#filter), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .filterSeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1];
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .filterSeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1];
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   */
-  filterSeries(iterator) {
-    return addProxy(this, FilterSeries, iterator);
-  }
-
-  /**
-   * `Aigle#filterLimit` is almost the same as [`Aigle#filter`](https://suguru03.github.io/aigle/docs/Aigle.html#filter)
-   * and [`Aigle#filterSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#filterSeries)), but it will work with concurrency.
-   * @param {integer} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .filterLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 5, 3];
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = {
-   *   task1: 1,
-   *   task2: 5,
-   *   task3: 3,
-   *   task4: 4,
-   *   task5: 2
-   * };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .filterLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 5, 3];
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .filterLimit(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 5, 3];
-   *     console.log(order); // [1, 2, 3, 4, 5];
-   *   });
-   */
-  filterLimit(limit, iterator) {
-    return addProxy(this, FilterLimit, limit, iterator);
-  }
-
-  /**
-   * @param {Function|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .reject(iterator)
-   *   .then(array => {
-   *     console.log(array); // [4, 2];
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .reject(iterator)
-   *   .then(array => {
-   *     console.log(array); // [4, 2];
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.collection(collection)
-   *   .reject('active')
-   *   .then(array => {
-   *     console.log(array); // [{ name: 'fread', active: false }]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.collection(collection)
-   *   .reject(['name', 'bargey'])
-   *   .then(array => {
-   *     console.log(array); // [{ name: 'fread', active: false }]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.collection(collection)
-   *   .reject({ name: 'bargey', active: false })
-   *   .then(array => {
-   *     console.log(array); // [{ name: 'fread', active: false }]
-   *   });
-   */
-  reject(iterator) {
-    return addProxy(this, Reject, iterator);
-  }
-
-  /**
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .rejectSeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [4, 2];
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .rejectSeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [4, 2];
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   */
-  rejectSeries(iterator) {
-    return addProxy(this, RejectSeries, iterator);
-  }
-
-  /**
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .rejectLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [4, 2]
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .rejectLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [4, 2]
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .rejectLimit(iterator)
-   *   .then(array => {
-   *     console.log(array); // [4, 2]
-   *     console.log(order); // [1, 2, 3, 4, 5]
-   *   });
-   */
-  rejectLimit(limit, iterator) {
-    return addProxy(this, RejectLimit, limit, iterator);
-  }
-
-  /**
-   * `Aigle#find` will execute [`Aigle.find`](https://suguru03.github.io/aigle/docs/global.html#find) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.find`](https://suguru03.github.io/aigle/docs/global.html#find) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|Array|Object|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .find(iterator)
-   *   .then(value => {
-   *     console.log(value); // 2
-   *     console.log(order); // [1, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .find(iterator)
-   *   .then(value => {
-   *     console.log(value); // 2
-   *     console.log(order); // [1, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return false;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .find(iterator)
-   *   .then(value => {
-   *     console.log(value); // undefined
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .find('active')
-   *   .then(object => {
-   *     console.log(object); // { name: 'fread', active: true }
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .find(['name', 'fread'])
-   *   .then(object => {
-   *     console.log(object); // { name: 'fread', active: true }
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .find({ name: 'fread', active: true })
-   *   .then(object => {
-   *     console.log(object); // { name: 'fread', active: true }
-   *   });
-   */
-  find(iterator) {
-    return addProxy(this, Find, iterator);
-  }
-
-  /**
-   * `Aigle#findSeries` is almost the same as [`Aigle#find`](https://suguru03.github.io/aigle/docs/Aigle.html#find), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findSeries(iterator)
-   *   .then(value => {
-   *     console.log(value); // 4
-   *     console.log(order); // [1, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findSeries(iterator)
-   *   .then(value => {
-   *     console.log(value); // 4
-   *     console.log(order); // [1, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return false;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findSeries(iterator)
-   *   .then(value => {
-   *     console.log(value); // undefined
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   */
-  findSeries(iterator) {
-    return addProxy(this, FindSeries, iterator);
-  }
-
-  /**
-   * `Aigle#findLimit` is almost the same as [`Aigle#find`](https://suguru03.github.io/aigle/docs/Aigle.html#find)
-   * and [`Aigle#findSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#findSeries)), but it will work with concurrency.
-   * @param {integer} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findLimit(2, iterator)
-   *   .then(value => {
-   *     console.log(value); // 2
-   *     console.log(order); // [1, 3, 5, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = {
-   *   task1: 1,
-   *   task2: 5,
-   *   task3: 3,
-   *   task4: 4,
-   *   task5: 2
-   * };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findLimit(2, iterator)
-   *   .then(value => {
-   *     console.log(value); // 2
-   *     console.log(order); // [1, 3, 5, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findLimit(2, iterator)
-   *   .then(value => {
-   *     console.log(value); // 2
-   *     console.log(order); // [1, 2];
-   *   });
-   */
-  findLimit(limit, iterator) {
-    return addProxy(this, FindLimit, limit, iterator);
-  }
-
-  /**
-   * `Aigle#findIndex` will execute [`Aigle.findIndex`](https://suguru03.github.io/aigle/docs/global.html#findIndex) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.findIndex`](https://suguru03.github.io/aigle/docs/global.html#findIndex) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|Array|Object|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findIndex(iterator)
-   *   .then(index => {
-   *     console.log(index); // 2
-   *     console.log(order); // [1, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return false;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findIndex(iterator)
-   *   .then(index => {
-   *     console.log(index); // -1
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .findIndex('active')
-   *   .then(index => {
-   *     console.log(index); // 1
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .findIndex(['name', 'fread'])
-   *   .then(index => {
-   *     console.log(index); // 1
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .findIndex({ name: 'fread', active: true })
-   *   .then(index => {
-   *     console.log(index); // 1
-   *   });
-   */
-  findIndex(iterator) {
-    return addProxy(this, FindIndex, iterator);
-  }
-
-  /**
-   * `Aigle#findIndexSeries` is almost the same as [`Aigle#findIndex`](https://suguru03.github.io/aigle/docs/Aigle.html#findIndex), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findIndexSeries(iterator)
-   *   .then(index => {
-   *     console.log(index); // 2
-   *     console.log(order); // [1, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return false;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findIndexSeries(iterator)
-   *   .then(index => {
-   *     console.log(index); // -1
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   */
-  findIndexSeries(iterator) {
-    return addProxy(this, FindIndexSeries, iterator);
-  }
-
-  /**
-   * `Aigle#findIndexLimit` is almost the same as [`Aigle#findIndex`](https://suguru03.github.io/aigle/docs/Aigle.html#findIndex)
-   * and [`Aigle#findIndexSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#findIndexSeries)), but it will work with concurrency.
-   * @param {integer} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findIndexLimit(2, iterator)
-   *   .then(index => {
-   *     console.log(index); // 4
-   *     console.log(order); // [1, 3, 5, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .findIndexLimit(2, iterator)
-   *   .then(index => {
-   *     console.log(index); // 4
-   *     console.log(order); // [1, 2];
-   *   });
-   */
-  findIndexLimit(limit, iterator) {
-    return addProxy(this, FindIndexLimit, limit, iterator);
-  }
-
-  /**
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   */
-  findKey(iterator) {
-    return addProxy(this, FindKey, iterator);
-  }
-
-  /**
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   */
-  findKeySeries(iterator) {
-    return addProxy(this, FindKeySeries, iterator);
-  }
-
-  /**
-   * @param {integer} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   */
-  findKeyLimit(limit, iterator) {
-    return addProxy(this, FindKeyLimit, limit, iterator);
-  }
-
-  /**
-   * @param {*} iterator
-   * @param {*} [args]
-   * @return {Aigle} Returns an Aigle instance
-   */
-  pick(iterator, ...args) {
-    return addProxy(this, Pick, iterator, args);
-  }
-
-  /**
-   * @alias pickBySeries
-   * @param {Function} iterator
-   */
-  pickSeries(iterator) {
-    return this.pickBySeries(iterator);
-  }
-
-  /**
-   * @alias pickByLimit
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   */
-  pickLimit(limit, iterator) {
-    return this.pickByLimit(limit, iterator);
-  }
-
-  /**
-   * `Aigle#pickBy` will execute [`Aigle.pickBy`](https://suguru03.github.io/aigle/docs/global.html#pickBy) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.pickBy`](https://suguru03.github.io/aigle/docs/global.html#pickBy) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .pickBy(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': 1 }
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .pickBy(iterator)
-   *   .then(object => {
-   *     console.log(object); // { a: 1 }
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .pickBy('active')
-   *   .then(object => {
-   *     console.log(object); // { '1': { name: 'fread', active: true } }
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .pickBy(['name', 'fread'])
-   *   .then(object => {
-   *     console.log(object); // { '1': { name: 'fread', active: true } }
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .pickBy({ name: 'fread', active: true })
-   *   .then(object => {
-   *     console.log(object); // { '1': { name: 'fread', active: true } }
-   *   });
-   */
-  pickBy(iterator) {
-    return addProxy(this, PickBy, iterator);
-  }
-
-  /**
-   * `Aigle#pickBySeries` is almost the same as [`Aigle#pickBy`](https://suguru03.github.io/aigle/docs/Aigle.html#pickBy), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .pickBySeries(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': 1 }
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num * 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .pickBySeries(iterator)
-   *   .then(object => {
-   *     console.log(object); // { a: 1 }
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   */
-  pickBySeries(iterator) {
-    return addProxy(this, PickBySeries, iterator);
-  }
-
-  /**
-   * `Aigle#pickByLimit` is almost the same as [`Aigle#pickBy`](https://suguru03.github.io/aigle/docs/Aigle.html#pickBy)
-   * and [`Aigle#pickBySeries`](https://suguru03.github.io/aigle/docs/Aigle.html#pickBySeries)), but it will work with concurrency.
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .pickByLimit(2, iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': 1, '1': 5, '2': 3 }
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .pickByLimit(2, iterator)
-   *   .then(object => {
-   *     console.log(object); // { a: 1, b: 5, c: 3 }
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .pickByLimit(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': 1, '1': 5, '2': 3 }
-   *     console.log(order); // [1, 2, 3, 4, 5]
-   *   });
-   */
-  pickByLimit(limit, iterator) {
-    return addProxy(this, PickByLimit, limit, iterator);
-  }
-
-  /**
-   * @param {*} iterator
-   * @param {*} [args]
-   * @return {Aigle} Returns an Aigle instance
-   */
-  omit(iterator, ...args) {
-    return addProxy(this, Omit, iterator, args);
-  }
-
-  /**
-   * @alias omitBySeries
-   * @param {Function} iterator
-   */
-  omitSeries(iterator) {
-    return this.omitBySeries(iterator);
-  }
-
-  /**
-   * @alias omitByLimit
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   */
-  omitLimit(limit, iterator) {
-    return this.omitByLimit(limit, iterator);
-  }
-
-  /**
-   * `Aigle#omitBy` will execute [`Aigle.omitBy`](https://suguru03.github.io/aigle/docs/global.html#omitBy) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.omitBy`](https://suguru03.github.io/aigle/docs/global.html#omitBy) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|Array|Object|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .omitBy(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '1': 4, '2': 4 }
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .omitBy(iterator)
-   *   .then(object => {
-   *     console.log(object); // { b: 4, c: 2 }
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .omitBy('active')
-   *   .then(object => {
-   *     console.log(object); // { '0': { name: 'bargey', active: false } }
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .omitBy(['name', 'fread'])
-   *   .then(object => {
-   *     console.log(object); // { '0': { name: 'bargey', active: false } }
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   name: 'bargey', active: false
-   * }, {
-   *   name: 'fread', active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .omitBy({ name: 'fread', active: true })
-   *   .then(object => {
-   *     console.log(object); // { '0': { name: 'bargey', active: false } }
-   *   });
-   */
-  omitBy(iterator) {
-    return addProxy(this, OmitBy, iterator);
-  }
-
-  /**
-   * `Aigle#omitBySeries` is almost the same as [`Aigle#omitBy`](https://suguru03.github.io/aigle/docs/Aigle.html#omitBy), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .omitBySeries(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '1': 4, '2': 4 }
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .omitBySeries(iterator)
-   *   .then(object => {
-   *     console.log(object); // { b: 4, c: 2 }
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   */
-  omitBySeries(iterator) {
-    return addProxy(this, OmitBySeries, iterator);
-  }
-
-  /**
-   * `Aigle#omitByLimit` is almost the same as [`Aigle#omitBy`](https://suguru03.github.io/aigle/docs/Aigle.html#omitBy)
-   * and [`Aigle#omitBySeries`](https://suguru03.github.io/aigle/docs/Aigle.html#omitBySeries)), but it will work with concurrency.
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .omitByLimit(2, iterator)
-   *   .then(object => {
-   *     console.log(object); // { '3': 4, '4': 2 }
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .omitByLimit(2, iterator)
-   *   .then(object => {
-   *     console.log(object); // { d: 4, e: 2 }
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .omitByLimit(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '3': 4, '4': 2 }
-   *     console.log(order); // [1, 2, 3, 4, 5]
-   *   });
-   */
-  omitByLimit(limit, iterator) {
-    return addProxy(this, OmitByLimit, limit, iterator);
-  }
-
-  /**
-   * @param {Function} iterator
-   * @param {*} result
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const collection = [1, 4, 2];
-   * const iterator = (result, num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => result + num);
-   * };
-   * return Aigle.resolve(collection)
-   *  .reduce(iterator, 1)
-   *  .then(value => console.log(value)); // 8
-   *
-   * @example
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (result, num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => result + num);
-   * };
-   * return Aigle.resolve(collection)
-   *   .reduce(iterator, '')
-   *   .then(value => console.log(value)); // '142'
-   */
-  reduce(iterator, result) {
-    return addProxy(this, Reduce, iterator, result);
-  }
-
-  /**
-   * @param {Function} iterator
-   * @param {Array|Object} [accumulator]
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (result, num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result[index] = num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transform(iterator, {})
-   *   .then(object => {
-   *     console.log(object); // { '0': 1, '1': 4, '2': 2 }
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (result, num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result.push(num);
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transform(iterator, {})
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 4]
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (result, num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result.push(num);
-   *       return num !== 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transform(iterator, [])
-   *   .then(array => {
-   *     console.log(array); // [1, 2]
-   *     console.log(order); // [1, 2]
-   *   });
-   */
-  transform(iterator, accumulator) {
-    return addProxy(this, Transform, iterator, accumulator);
-  }
-
-  /**
-   * @param {Function} iterator
-   * @param {Array|Object} [accumulator]
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (result, num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result[index] = num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transformSeries(iterator, {})
-   *   .then(object => {
-   *     console.log(object); // { '0': 1, '1': 4, '2': 2 }
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (result, num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result.push(num);
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transformSeries(iterator, {})
-   *   .then(array => {
-   *     console.log(array); // [1, 4, 2]
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (result, num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result.push(num);
-   *       return num !== 4;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transformSeries(iterator, [])
-   *   .then(array => {
-   *     console.log(array); // [1, 4]
-   *     console.log(order); // [1, 4]
-   *   });
-   */
-  transformSeries(iterator, accumulator) {
-    return addProxy(this, TransformSeries, iterator, accumulator);
-  }
-
-  /**
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @param {Array|Object} [accumulator]
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (result, num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result[index] = num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transformLimit(2, iterator, {})
-   *   .then(object => {
-   *     console.log(object); // { '0': 1, '1': 5, '2': 3, '3': 4, '4': 2 }
-   *     console.log(order); // [1, 5, 3, 4, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (result, num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result.push(num);
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transformLimit(2, iterator, {})
-   *   .then(array => {
-   *     console.log(array); // [1, 5, 3, 4, 2]
-   *     console.log(order); // [1, 5, 3, 4, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
-   * const iterator = (result, num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result.push(num);
-   *       return num !== 4;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transformLimit(2, iterator, [])
-   *   .then(array => {
-   *     console.log(array); // [1, 5, 3, 4]
-   *     console.log(order); // [1, 5, 3, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
-   * const iterator = (result, num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       result.push(num);
-   *       return num !== 4;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .transformLimit(iterator, [])
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 3, 4]
-   *     console.log(order); // [1, 2, 3, 4]
-   *   });
-   */
-  transformLimit(limit, iterator, accumulator) {
-    return addProxy(this, TransformLimit, limit, iterator, accumulator);
-  }
-
-  /**
-   * `Aigle#sortBy` will execute [`Aigle.sortBy`](https://suguru03.github.io/aigle/docs/global.html#sortBy) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.sortBy`](https://suguru03.github.io/aigle/docs/global.html#sortBy) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .sortBy(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 4]
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .sortBy(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 4]
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [{
-   *   uid: 2, name: 'bargey', uid: 2
-   * }, {
-   *   uid: 1, name: 'fread'
-   * }];
-   * Aigle.resolve(collection)
-   *   .sortBy('uid')
-   *   .then(array => {
-   *     console.log(array); // [{ uid: 1, name: 'fread' }, { uid: 2, name: 'bargey' ]
-   *   });
-   */
-  sortBy(iterator) {
-    return addProxy(this, SortBy, iterator);
-  }
-
-  /**
-   * `Aigle#sortBySeries` is almost the same as [`Aigle#sortBy`](https://suguru03.github.io/aigle/docs/Aigle.html#sortBy), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .sortBySeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 4]
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .sortBySeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 4]
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   */
-  sortBySeries(iterator) {
-    return addProxy(this, SortBySeries, iterator);
-  }
-
-  /**
-   * `Aigle#sortByLimit` is almost the same as [`Aigle#sortBy`](https://suguru03.github.io/aigle/docs/Aigle.html#sortBy)
-   * and [`Aigle#sortBySeries`](https://suguru03.github.io/aigle/docs/Aigle.html#sortBySeries)), but it will work with concurrency.
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .sortByLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 3, 4, 5]
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .sortByLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 3, 4, 5]
-   *     console.log(order); // [1, 3, 5, 2, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .sortByLimit(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 3, 4, 5]
-   *     console.log(order); // [1, 2, 3, 4, 5]
-   *   });
-   */
-  sortByLimit(limit, iterator) {
-    return addProxy(this, SortByLimit, limit, iterator);
-  }
-
-  /**
-   * `Aigle#some` will execute [`Aigle.some`](https://suguru03.github.io/aigle/docs/global.html#some) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.some`](https://suguru03.github.io/aigle/docs/global.html#some) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .some(iterator)
-   *   .then(bool => {
-   *     console.log(bool); // true
-   *     console.log(order); // [1, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .some(iterator)
-   *   .then(bool => {
-   *     console.log(bool); // true
-   *     console.log(order); // [1, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return false;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .some(iterator)
-   *   .then(bool => {
-   *     console.log(bool); // false
-   *     console.log(order); // [1, 2, 4]
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *  uid: 1, active: false
-   * }, {
-   *  uid: 4, active: true
-   * }, {
-   *  uid: 2, active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .some('active')
-   *   .then(value => console.log(value)); // true
-   *
-   * @example
-   * const collection = [{
-   *  uid: 1, active: false
-   * }, {
-   *  uid: 4, active: true
-   * }, {
-   *  uid: 2, active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .some(['uid', 4])
-   *   .then(value => console.log(value)); // true
-   *
-   * @example
-   * const collection = [{
-   *  uid: 1, active: false
-   * }, {
-   *  uid: 4, active: true
-   * }, {
-   *  uid: 2, active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .some({ uid: 4 })
-   *   .then(value => console.log(value)); // true
-   */
-  some(iterator) {
-    return addProxy(this, Some, iterator);
-  }
-
-  /**
-   * `Aigle#someSeries` is almost the same as [`Aigle#some`](https://suguru03.github.io/aigle/docs/Aigle.html#some), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .someSeries(iterator)
-   *   .then(bool => {
-   *     console.log(bool); // true
-   *     console.log(order); // [1, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .someSeries(iterator)
-   *   .then(bool => {
-   *     console.log(bool); // true
-   *     console.log(order); // [1, 4]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return false;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .someSeries(iterator)
-   *   .then(bool => {
-   *     console.log(bool); // false
-   *     console.log(order); // [1, 4, 2]
-   *   });
-   */
-  someSeries(iterator) {
-    return addProxy(this, SomeSeries, iterator);
-  }
-
-  /**
-   * `Aigle#someLimit` is almost the same as [`Aigle#some`](https://suguru03.github.io/aigle/docs/Aigle.html#some)
-   * and [`Aigle#someSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#someSeries)), but it will work with concurrency.
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .someLimit(2, iterator)
-   *   .then(bool => {
-   *     console.log(bool); // true
-   *     console.log(order); // [1, 3, 5, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .someLimit(2, iterator)
-   *   .then(bool => {
-   *     console.log(bool); // true
-   *     console.log(order); // [1, 3, 5, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2 === 0;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .someLimit(2, iterator)
-   *   .then(bool => {
-   *     console.log(bool); // true
-   *     console.log(order); // [1, 2]
-   *   });
-   */
-  someLimit(limit, iterator) {
-    return addProxy(this, SomeLimit, limit, iterator);
-  }
-
-  /**
-   * `Aigle#every` will execute [`Aigle.every`](https://suguru03.github.io/aigle/docs/global.html#every) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.every`](https://suguru03.github.io/aigle/docs/global.html#every) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function|Array|Object|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return true;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .every(iterator)
-   *   .then(value => {
-   *     console.log(value); // true
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return true;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .every(iterator)
-   *   .then(value => {
-   *     console.log(value); // true
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return n % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .every(iterator)
-   *   .then(value => {
-   *     console.log(value); // false
-   *     console.log(order); // [1, 2];
-   *   });
-   *
-   * @example
-   * const collection = [{
-   *  uid: 1, active: false
-   * }, {
-   *  uid: 4, active: true
-   * }, {
-   *  uid: 2, active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .every('active')
-   *   .then(value => console.log(value)); // false
-   *
-   * @example
-   * const collection = [{
-   *  uid: 1, active: false
-   * }, {
-   *  uid: 4, active: true
-   * }, {
-   *  uid: 2, active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .every('active')
-   *   .then(value => console.log(value)); // false
-   *
-   * @example
-   * const collection = [{
-   *  uid: 1, active: false
-   * }, {
-   *  uid: 4, active: true
-   * }, {
-   *  uid: 2, active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .every(['active', true])
-   *   .then(value => console.log(value)); // false
-   *
-   * @example
-   * const collection = [{
-   *  uid: 1, active: true
-   * }, {
-   *  uid: 4, active: true
-   * }, {
-   *  uid: 2, active: true
-   * }];
-   * Aigle.resolve(collection)
-   *   .every({ active: true })
-   *   .then(value => console.log(value)); // true
-   */
-  every(iterator) {
-    return addProxy(this, Every, iterator);
-  }
-
-  /**
-   * `Aigle#everySeries` is almost the same as [`Aigle#every`](https://suguru03.github.io/aigle/docs/Aigle.html#every), but it will work in series.
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return true;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .everySeries(iterator)
-   *   .then(value => {
-   *     console.log(value); // true
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return true;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .everySeries(iterator)
-   *   .then(value => {
-   *     console.log(value); // true
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return n % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .everySeries(iterator)
-   *   .then(value => {
-   *     console.log(value); // false
-   *     console.log(order); // [1, 4];
-   *   });
-   */
-  everySeries(iterator) {
-    return addProxy(this, EverySeries, iterator);
-  }
-
-  /**
-   * `Aigle#everyLimit` is almost the same as [`Aigle#every`](https://suguru03.github.io/aigle/docs/Aigle.html#every) and
-   * [`Aigle#everySeries`](https://suguru03.github.io/aigle/docs/Aigle.html#everySeries), but it will work with concurrency.
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return true;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .everyLimit(2, iterator)
-   *   .then(value => {
-   *     console.log(value); // true
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = {
-   *   task1: 1,
-   *   task2: 5,
-   *   task3: 3,
-   *   task4: 4,
-   *   task5: 2
-   * };
-   * const iterator = (num, key, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return true;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .everyLimit(2, iterator)
-   *   .then(value => {
-   *     console.log(value); // true
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num === 4;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .everyLimit(iterator)
-   *   .then(value => {
-   *     console.log(value); // false
-   *     console.log(order); // [1, 2, 3, 4];
-   *   });
-   */
-  everyLimit(limit, iterator) {
-    return addProxy(this, EveryLimit, limit, iterator);
-  }
-
-  /**
-   * `Aigle#concat` will execute [`Aigle.concat`](https://suguru03.github.io/aigle/docs/global.html#concat) using a previous promise value and a defined iterator.
-   * The value will be assigned as the first argument to [`Aigle.concat`](https://suguru03.github.io/aigle/docs/global.html#concat) and
-   * the iterator will be assigned as the second argument.
-   * @param {Function} iterator
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index, collectioin) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .concat(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 4];
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .concat(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 2, 4];
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   */
-  concat(iterator) {
-    return addProxy(this, Concat, iterator);
-  }
-
-  /**
-   * `Aigle#concatSeries` is almost the same as [`Aigle#concat`](https://suguru03.github.io/aigle/docs/Aigle.html#concat), but it will work in series.
-   * @param {Function} iterator
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .concatSeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 4, 2];
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .concatSeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 4, 2];
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   */
-  concatSeries(iterator) {
-    return addProxy(this, ConcatSeries, iterator);
-  }
-
-  /**
-   * `Aigle#concatLimit` is almost the same as [`Aigle#concat`](https://suguru03.github.io/aigle/docs/Aigle.html#concat)
-   * and [`Aigle#concatSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#concatSeries)), but it will work with concurrency.
-   * @param {integer} [limit=8]
-   * @param {Function} iterator
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .concatLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 3, 5, 2, 4];
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = {
-   *   task1: 1,
-   *   task2: 5,
-   *   task3: 3,
-   *   task4: 4,
-   *   task5: 2
-   * };
-   * const iterator = (num, key, collection) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .concatLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 3, 5, 2, 4];
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .concatLimit(iterator)
-   *   .then(array => {
-   *     console.log(array); // [1, 3, 5, 2, 4];
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   */
-  concatLimit(limit, iterator) {
-    return addProxy(this, ConcatLimit, limit, iterator);
-  }
-
-  /**
-   * @param {Function|string} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .groupBy(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': [2, 4], '1': [1] };
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .groupBy(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': [2, 4], '1': [1] };
-   *     console.log(order); // [1, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = ['one', 'two', 'three'];
-   * Aigle.resolve(collection)
-   *   .groupBy('length')
-   *   .then(object => {
-   *     console.log(object); // { '3': ['one', 'two'], '5': ['three'] };
-   *   });
-   */
-  groupBy(iterator) {
-    return addProxy(this, GroupBy, iterator);
-  }
-
-  /**
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .groupBySeries(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': [4, 2], '1': [1] };
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = { a: 1, b: 4, c: 2 };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .groupBySeries(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': [4, 2], '1': [1] };
-   *     console.log(order); // [1, 4, 2];
-   *   });
-   */
-  groupBySeries(iterator) {
-    return addProxy(this, GroupBySeries, iterator);
-  }
-
-  /**
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = (num, index) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .groupByLimit(2, iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': [2, 4], '1': [1, 3, 5] };
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = {
-   *   task1: 1,
-   *   task2: 5,
-   *   task3: 3,
-   *   task4: 4,
-   *   task5: 2
-   * };
-   * const iterator = (num, key) => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .groupByLimit(2, iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': [2, 4], '1': [1, 3, 5] };
-   *     console.log(order); // [1, 3, 5, 2, 4];
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const collection = [1, 5, 3, 4, 2];
-   * const iterator = num => {
-   *   return Aigle.delay(num * 10)
-   *     .then(() => {
-   *       order.push(num);
-   *       return num % 2;
-   *     });
-   * };
-   * Aigle.resolve(collection)
-   *   .groupByLimit(iterator)
-   *   .then(object => {
-   *     console.log(object); // { '0': [2, 4], '1': [1, 3, 5] };
-   *     console.log(order); // [1, 2, 3, 4, 5];
-   *   });
-   */
-  groupByLimit(limit, iterator) {
-    return addProxy(this, GroupByLimit, limit, iterator);
-  }
-
-  /**
-   * After a previous promise is resolved, the timer will be started with `ms`.
-   * After `ms`, the delay's promise will be resolved with the previous promise value.
-   * @param {number} ms
-   * @example
-   * Aigle.resolve()
-   *   .delay(10)
-   *   .then(value => console.log(value); // undefined
-   *
-   * @example
-   * Aigle.resolve('test')
-   *   .delay(10)
-   *   .then(value => console.log(value); // 'test'
-   */
-  delay(ms) {
-    return addAigle(this, new Delay(ms));
-  }
-
-  /**
-   * @param {number} ms
-   * @param {*} [message]
-   * @example
-   * const { TimeoutError } = Aigle;
-   * Aigle.delay(100)
-   *   .timeout(10)
-   *   .catch(TimeoutError, error => {
-   *     console.log(error); // operation timed out
-   *   });
-   */
-  timeout(ms, message) {
-    return addReceiver(this, new Timeout(ms, message));
-  }
-
-  /**
-   * @param {Function} tester
-   * @param {Function} iterator
-   */
-  whilst(tester, iterator) {
-    return this.then(value => whilst(value, tester, iterator));
-  }
-
-  /**
-   * @param {Function} iterator
-   * @param {Function} tester
-   * @example
-   * const order = [];
-   * const tester = num => {
-   *   order.push(`t:${num}`);
-   *   return Aigle.delay(10)
-   *     .then(() => num !== 4);
-   * };
-   * const iterator = count => {
-   *   const num = ++count;
-   *   order.push(`i:${num}`);
-   *   return Aigle.delay(10)
-   *     .then(() => num);
-   * };
-   * Aigle.resolve(0)
-   *   .doWhilst(iterator, tester)
-   *   .then(value => {
-   *     console.log(value); // 4
-   *     console.log(order); // [ 'i:1', 't:1', 'i:2', 't:2', 'i:3', 't:3', 'i:4', 't:4' ]
-   *   });
-   */
-  doWhilst(iterator, tester) {
-    return this.then(value => doWhilst(value, iterator, tester));
-  }
-
-  /**
-   * @param {Function} tester
-   * @param {Function} iterator
-   */
-  until(tester, iterator) {
-    return this.then(value => until(value, tester, iterator));
-  }
-
-  /**
-   * @param {Function} iterator
-   * @param {Function} tester
-   * @example
-   * const order = [];
-   * const tester = num => {
-   *   order.push(`t:${num}`);
-   *   return Aigle.delay(10)
-   *     .then(() => num === 4);
-   * };
-   * const iterator = count => {
-   *   const num = ++count;
-   *   order.push(`i:${num}`);
-   *   return Aigle.delay(10)
-   *     .then(() => num);
-   * };
-   * Aigle.resolve(0)
-   *   .doUntil(iterator, tester)
-   *   .then(value => {
-   *     console.log(value); // 4
-   *     console.log(order); // [ 'i:1', 't:1', 'i:2', 't:2', 'i:3', 't:3', 'i:4', 't:4' ]
-   *   });
-   */
-  doUntil(iterator, tester) {
-    return this.then(value => doUntil(value, iterator, tester));
-  }
-
-  /**
-   * @param {Function} onFulfilled
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * Aigle.resolve(3)
-   *   .thru(value => ++value)
-   *   .then(value => {
-   *     console.log(value); // 4;
-   *   });
-   */
-  thru(onFulfilled) {
-    return this.then(value => thru(value, onFulfilled));
-  }
-
-  /**
-   * @param {Function} onFulfilled
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * Aigle.resolve([1, 4, 2])
-   *   .tap(array => array.pop())
-   *   .then(array => {
-   *     console.log(array); // [1, 4]
-   *   });
-   */
-  tap(onFulfilled) {
-    return this.then(value => tap(value, onFulfilled));
-  }
-
-  /**
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const timer = [30, 20, 10];
-   * const iterator = n => {
-   *   return Aigle.delay(timer[n])
-   *     .then(() => {
-   *       order.push(n);
-   *       return n;
-   *     });
-   * };
-   * Aigle.resolve(3)
-   *   .times(iterator)
-   *   .then(array => {
-   *     console.log(array); // [0, 1, 2]
-   *     console.log(order); // [2, 1, 0]
-   *   });
-   */
-  times(iterator) {
-    return addProxy(this, Times, iterator);
-  }
-
-  /**
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const timer = [30, 20, 10];
-   * const iterator = n => {
-   *   return Aigle.delay(timer[n])
-   *     .then(() => {
-   *       order.push(n);
-   *       return n;
-   *     });
-   * };
-   * Aigle.resolve(3)
-   *   .timesSeries(iterator)
-   *   .then(array => {
-   *     console.log(array); // [0, 1, 2]
-   *     console.log(order); // [0, 1, 2]
-   *   });
-   */
-  timesSeries(iterator) {
-    return addProxy(this, TimesSeries, iterator);
-  }
-
-  /**
-   * @param {number} [limit=8]
-   * @param {Function} iterator
-   * @return {Aigle} Returns an Aigle instance
-   * @example
-   * const order = [];
-   * const timer = [30, 20, 10];
-   * const iterator = n => {
-   *   return Aigle.delay(timer[n])
-   *     .then(() => {
-   *       order.push(n);
-   *       return n;
-   *     });
-   * };
-   * Aigle.resolve(3)
-   *   .timesLimit(2, iterator)
-   *   .then(array => {
-   *     console.log(array); // [0, 1, 2]
-   *     console.log(order); // [1, 0, 2]
-   *   });
-   *
-   * @example
-   * const order = [];
-   * const timer = [30, 20, 10];
-   * const iterator = n => {
-   *   return Aigle.delay(timer[n])
-   *     .then(() => {
-   *       order.push(n);
-   *       return n;
-   *     });
-   * };
-   * Aigle.resolve(3)
-   *   .timesLimit(iterator)
-   *   .then(array => {
-   *     console.log(array); // [0, 1, 2]
-   *     console.log(order); // [2, 1, 0]
-   *   });
-   */
-  timesLimit(limit, iterator) {
-    return addProxy(this, TimesLimit, limit, iterator);
-  }
-
-  /**
-   * @param {Function} handler
-   */
-  disposer(handler) {
-    return new Disposer(this, handler);
-  }
-
-  /* internal functions */
-
-  _resolve(value) {
-    if (this._resolved !== 0) {
-      return;
-    }
-    this._resolved = 1;
-    this._value = value;
-    if (this._receiver === undefined) {
-      return;
-    }
-    this._callResolve();
-  }
-
-  _callResolve() {
-    const { _receiver } = this;
-    this._receiver = undefined;
-    if (_receiver instanceof AigleProxy) {
-      _receiver._callResolve(this._value, this._key);
-    } else if (this._key === INTERNAL) {
-      _receiver._resolve(this._value);
-    } else {
-      callResolve(_receiver, this._onFulfilled, this._value);
-    }
-    if (!this._receivers) {
-      return;
-    }
-    const { _value, _key, _receivers } = this;
-    this._receivers = undefined;
-    let i = -1;
-    const { array } = _receivers;
-    while (++i < _receivers.length) {
-      const { receiver, onFulfilled } = array[i];
-      if (receiver instanceof AigleProxy) {
-        receiver._callResolve(_value, _key);
-      } else {
-        callResolve(receiver, onFulfilled, _value);
-      }
-    }
-  }
-
-  _reject(reason) {
-    if (this._resolved !== 0) {
-      return;
-    }
-    this._resolved = 2;
-    this._value = reason;
-    if (this._receiver === undefined) {
-      this._receiver = UNHANDLED;
-      invokeAsync(this);
-      return;
-    }
-    stackTraces && reconstructStack(this);
-    this._callReject();
-  }
-
-  _callReject() {
-    const { _receiver } = this;
-    this._receiver = undefined;
-    if (_receiver === undefined || _receiver === UNHANDLED) {
-      printWarning(this._value);
-      process.emit('unhandledRejection', this._value);
-      return;
-    }
-    if (_receiver === INTERNAL) {
-      return;
-    }
-    if (_receiver instanceof AigleProxy) {
-      _receiver._callReject(this._value);
-    } else if (this._key === INTERNAL) {
-      _receiver._reject(this._value);
-    } else {
-      callReject(_receiver, this._onRejected, this._value);
-    }
-    if (!this._receivers) {
-      return;
-    }
-    const { _value, _receivers } = this;
-    this._receivers = undefined;
-    let i = -1;
-    const { array } = _receivers;
-    while (++i < _receivers.length) {
-      const { receiver, onRejected } = array[i];
-      if (receiver instanceof AigleProxy) {
-        receiver._callReject(_value);
-      } else {
-        callReject(receiver, onRejected, _value);
-      }
-    }
-  }
-
-  _addReceiver(receiver, key) {
-    this._key = key;
-    this._receiver = receiver;
-  }
-}
-
-Aigle.prototype._execute = execute;
-
-module.exports = Aigle;
-module.exports.default = Aigle;
-
-/* functions, classes */
-const { all, All } = __nccwpck_require__(3351);
-const { allSettled, AllSettled } = __nccwpck_require__(5490);
-const attempt = __nccwpck_require__(8108);
-const { race, Race } = __nccwpck_require__(2901);
-const { props, Props } = __nccwpck_require__(466);
-const { parallel, Parallel } = __nccwpck_require__(8176);
-const { series, Series } = __nccwpck_require__(9429);
-const { parallelLimit, ParallelLimit } = __nccwpck_require__(9587);
-const { each, Each } = __nccwpck_require__(4881);
-const { eachSeries, EachSeries } = __nccwpck_require__(9508);
-const { eachLimit, EachLimit } = __nccwpck_require__(2765);
-const { map, Map } = __nccwpck_require__(352);
-const { mapSeries, MapSeries } = __nccwpck_require__(4738);
-const { mapLimit, MapLimit } = __nccwpck_require__(3705);
-const { mapValues, MapValues } = __nccwpck_require__(1928);
-const { mapValuesSeries, MapValuesSeries } = __nccwpck_require__(2380);
-const { mapValuesLimit, MapValuesLimit } = __nccwpck_require__(8164);
-const { filter, Filter } = __nccwpck_require__(3940);
-const { filterSeries, FilterSeries } = __nccwpck_require__(8569);
-const { filterLimit, FilterLimit } = __nccwpck_require__(7699);
-const { reject, Reject } = __nccwpck_require__(7306);
-const { rejectSeries, RejectSeries } = __nccwpck_require__(8450);
-const { rejectLimit, RejectLimit } = __nccwpck_require__(1099);
-const { find, Find } = __nccwpck_require__(9919);
-const { findSeries, FindSeries } = __nccwpck_require__(6110);
-const { findLimit, FindLimit } = __nccwpck_require__(3784);
-const { findIndex, FindIndex } = __nccwpck_require__(3516);
-const { findIndexSeries, FindIndexSeries } = __nccwpck_require__(22);
-const { findIndexLimit, FindIndexLimit } = __nccwpck_require__(6288);
-const { findKey, FindKey } = __nccwpck_require__(4597);
-const { findKeySeries, FindKeySeries } = __nccwpck_require__(7271);
-const { findKeyLimit, FindKeyLimit } = __nccwpck_require__(9410);
-const { pick, Pick } = __nccwpck_require__(6245);
-const { pickBy, PickBy } = __nccwpck_require__(8254);
-const { pickBySeries, PickBySeries } = __nccwpck_require__(9863);
-const { pickByLimit, PickByLimit } = __nccwpck_require__(8134);
-const { omit, Omit } = __nccwpck_require__(6259);
-const { omitBy, OmitBy } = __nccwpck_require__(9194);
-const { omitBySeries, OmitBySeries } = __nccwpck_require__(3752);
-const { omitByLimit, OmitByLimit } = __nccwpck_require__(3195);
-const { reduce, Reduce } = __nccwpck_require__(1902);
-const { transform, Transform } = __nccwpck_require__(804);
-const { transformSeries, TransformSeries } = __nccwpck_require__(9589);
-const { transformLimit, TransformLimit } = __nccwpck_require__(246);
-const { sortBy, SortBy } = __nccwpck_require__(9996);
-const { sortBySeries, SortBySeries } = __nccwpck_require__(240);
-const { sortByLimit, SortByLimit } = __nccwpck_require__(516);
-const { some, Some } = __nccwpck_require__(530);
-const { someSeries, SomeSeries } = __nccwpck_require__(6383);
-const { someLimit, SomeLimit } = __nccwpck_require__(810);
-const { every, Every } = __nccwpck_require__(1873);
-const { everySeries, EverySeries } = __nccwpck_require__(3727);
-const { everyLimit, EveryLimit } = __nccwpck_require__(8235);
-const { concat, Concat } = __nccwpck_require__(214);
-const { concatSeries, ConcatSeries } = __nccwpck_require__(5715);
-const { concatLimit, ConcatLimit } = __nccwpck_require__(2798);
-const { groupBy, GroupBy } = __nccwpck_require__(9696);
-const { groupBySeries, GroupBySeries } = __nccwpck_require__(8409);
-const { groupByLimit, GroupByLimit } = __nccwpck_require__(9300);
-const { join, Spread } = __nccwpck_require__(3285);
-const promisify = __nccwpck_require__(215);
-const promisifyAll = __nccwpck_require__(4397);
-const { delay, Delay } = __nccwpck_require__(9554);
-const Timeout = __nccwpck_require__(8528);
-const { whilst } = __nccwpck_require__(2043);
-const { doWhilst } = __nccwpck_require__(2546);
-const { until } = __nccwpck_require__(1891);
-const doUntil = __nccwpck_require__(2969);
-const retry = __nccwpck_require__(1016);
-const thru = __nccwpck_require__(5193);
-const tap = __nccwpck_require__(7678);
-const flow = __nccwpck_require__(8027);
-const { times, Times } = __nccwpck_require__(7949);
-const { timesSeries, TimesSeries } = __nccwpck_require__(3864);
-const { timesLimit, TimesLimit } = __nccwpck_require__(5545);
-const { using, Disposer } = __nccwpck_require__(5523);
-const { resolveStack, reconstructStack } = __nccwpck_require__(7119);
-const { createProxy } = __nccwpck_require__(3558);
-
-Aigle.VERSION = VERSION;
-Aigle.Aigle = Aigle;
-
-/* core functions */
-Aigle.resolve = _resolve;
-Aigle.reject = _reject;
-
-/* collections */
-Aigle.all = all;
-Aigle.allSettled = allSettled;
-Aigle.race = race;
-Aigle.props = props;
-Aigle.series = series;
-Aigle.parallel = parallel;
-Aigle.parallelLimit = parallelLimit;
-Aigle.each = each;
-Aigle.eachSeries = eachSeries;
-Aigle.eachLimit = eachLimit;
-Aigle.forEach = each;
-Aigle.forEachSeries = eachSeries;
-Aigle.forEachLimit = eachLimit;
-Aigle.map = map;
-Aigle.mapSeries = mapSeries;
-Aigle.mapLimit = mapLimit;
-Aigle.mapValues = mapValues;
-Aigle.mapValuesSeries = mapValuesSeries;
-Aigle.mapValuesLimit = mapValuesLimit;
-Aigle.filter = filter;
-Aigle.filterSeries = filterSeries;
-Aigle.filterLimit = filterLimit;
-Aigle.rejectSeries = rejectSeries;
-Aigle.rejectLimit = rejectLimit;
-Aigle.find = find;
-Aigle.findSeries = findSeries;
-Aigle.findLimit = findLimit;
-Aigle.findIndex = findIndex;
-Aigle.findIndexSeries = findIndexSeries;
-Aigle.findIndexLimit = findIndexLimit;
-Aigle.findKey = findKey;
-Aigle.findKeySeries = findKeySeries;
-Aigle.findKeyLimit = findKeyLimit;
-Aigle.detect = find;
-Aigle.detectSeries = findSeries;
-Aigle.detectLimit = findLimit;
-Aigle.pick = pick;
-Aigle.pickSeries = pickBySeries;
-Aigle.pickLimit = pickByLimit;
-Aigle.pickBy = pickBy;
-Aigle.pickBySeries = pickBySeries;
-Aigle.pickByLimit = pickByLimit;
-Aigle.omit = omit;
-Aigle.omitSeries = omitBySeries;
-Aigle.omitLimit = omitByLimit;
-Aigle.omitBy = omitBy;
-Aigle.omitBySeries = omitBySeries;
-Aigle.omitByLimit = omitByLimit;
-Aigle.reduce = reduce;
-Aigle.transform = transform;
-Aigle.transformSeries = transformSeries;
-Aigle.transformLimit = transformLimit;
-Aigle.sortBy = sortBy;
-Aigle.sortBySeries = sortBySeries;
-Aigle.sortByLimit = sortByLimit;
-Aigle.some = some;
-Aigle.someSeries = someSeries;
-Aigle.someLimit = someLimit;
-Aigle.every = every;
-Aigle.everySeries = everySeries;
-Aigle.everyLimit = everyLimit;
-Aigle.concat = concat;
-Aigle.concatSeries = concatSeries;
-Aigle.concatLimit = concatLimit;
-Aigle.groupBy = groupBy;
-Aigle.groupBySeries = groupBySeries;
-Aigle.groupByLimit = groupByLimit;
-
-Aigle.attempt = attempt;
-Aigle.try = attempt;
-Aigle.join = join;
-Aigle.promisify = promisify;
-Aigle.promisifyAll = promisifyAll;
-Aigle.delay = delay;
-Aigle.whilst = whilst;
-Aigle.doWhilst = doWhilst;
-Aigle.until = until;
-Aigle.doUntil = doUntil;
-Aigle.retry = retry;
-Aigle.thru = thru;
-Aigle.tap = tap;
-Aigle.flow = flow;
-Aigle.times = times;
-Aigle.timesSeries = timesSeries;
-Aigle.timesLimit = timesLimit;
-Aigle.using = using;
-Aigle.mixin = mixin;
-
-/* debug */
-Aigle.config = config;
-Aigle.longStackTraces = longStackTraces;
-
-/* errors */
-const { CancellationError, TimeoutError } = __nccwpck_require__(1519);
-Aigle.CancellationError = CancellationError;
-Aigle.TimeoutError = TimeoutError;
-
-function _resolve(value) {
-  if (value instanceof AigleCore) {
-    return value;
-  }
-  const promise = new Aigle(INTERNAL);
-  callReceiver(promise, value);
-  return promise;
-}
-
-function _reject(reason, iterator) {
-  if (arguments.length === 2 && typeof iterator === 'function') {
-    return reject(reason, iterator);
-  }
-  const promise = new Aigle(INTERNAL);
-  promise._reject(reason);
-  return promise;
-}
-
-function execute(executor) {
-  stackTraces && resolveStack(this);
-  try {
-    executor(
-      value => {
-        if (executor === undefined) {
-          return;
-        }
-        executor = undefined;
-        callReceiver(this, value);
-      },
-      reason => {
-        if (executor === undefined) {
-          return;
-        }
-        executor = undefined;
-        this._reject(reason);
-      }
-    );
-  } catch (e) {
-    if (executor === undefined) {
-      return;
-    }
-    executor = undefined;
-    this._reject(e);
-  }
-}
-
-function executeWithCancel(executor) {
-  stackTraces && resolveStack(this);
-  try {
-    executor(
-      value => {
-        if (executor === undefined) {
-          return;
-        }
-        if (value instanceof Aigle && value._resolved === 0) {
-          this._parent = value;
-        }
-        executor = undefined;
-        callReceiver(this, value);
-      },
-      reason => {
-        if (executor === undefined) {
-          return;
-        }
-        executor = undefined;
-        this._reject(reason);
-      },
-      handler => {
-        if (typeof handler !== 'function') {
-          throw new TypeError('onCancel must be function');
-        }
-        if (this._resolved !== 0) {
-          return;
-        }
-        if (this._onCancelQueue === undefined) {
-          this._onCancelQueue = new Queue();
-        }
-        this._onCancelQueue.push(handler);
-      }
-    );
-  } catch (e) {
-    if (executor === undefined) {
-      return;
-    }
-    executor = undefined;
-    this._reject(e);
-  }
-}
-
-function createOnRejected(errorTypes, onRejected) {
-  return reason => {
-    let l = errorTypes.length;
-    while (l--) {
-      const errorType = errorTypes[l];
-      if (errorType === Error || errorType.prototype instanceof Error) {
-        if (reason instanceof errorType) {
-          return onRejected(reason);
-        }
-      } else if (errorType(reason)) {
-        return onRejected(reason);
-      }
-    }
-    errorObj.e = reason;
-    return errorObj;
-  };
-}
-
-function createFinallyHandler(promise, handler) {
-  return () => {
-    const { _resolved, _value } = promise;
-    const p = call0(handler);
-    if (p === errorObj) {
-      return p;
-    }
-    if (p instanceof AigleCore) {
-      switch (p._resolved) {
-        case 1:
-          p._value = _value;
-          return p;
-        case 2:
-          return p;
-      }
-    }
-    const receiver = new Aigle(INTERNAL);
-    if (!p || !p.then) {
-      receiver._resolved = _resolved;
-      receiver._value = _value;
-    } else if (_resolved === 1) {
-      p.then(() => receiver._resolve(_value), reason => receiver._reject(reason));
-    } else {
-      p.then(() => receiver._reject(_value), reason => receiver._reject(reason));
-    }
-    return receiver;
-  };
-}
-
-function addAigle(promise, receiver, onFulfilled, onRejected) {
-  stackTraces && resolveStack(receiver);
-  if (promise._receiver === undefined || promise._receiver === INTERNAL) {
-    promise._resolved !== 0 && invokeAsync(promise);
-    promise._receiver = receiver;
-    promise._onFulfilled = onFulfilled;
-    promise._onRejected = onRejected;
-  } else if (promise._receiver === UNHANDLED) {
-    promise._receiver = receiver;
-    promise._onFulfilled = onFulfilled;
-    promise._onRejected = onRejected;
-  } else {
-    if (!promise._receivers) {
-      promise._receivers = new Queue();
-    }
-    promise._receivers.push({ receiver, onFulfilled, onRejected });
-  }
-  return receiver;
-}
-
-function addReceiver(promise, receiver) {
-  stackTraces && resolveStack(receiver);
-  promise._resolved !== 0 && invokeAsync(promise);
-  promise._receiver = receiver;
-  return receiver._promise;
-}
-
-function addProxy(promise, Proxy, arg1, arg2, arg3) {
-  if (stackTraces) {
-    stackTraces = false;
-    const receiver = addProxy(promise, Proxy, arg1, arg2, arg3);
-    stackTraces = true;
-    resolveStack(receiver);
-    return receiver;
-  }
-  switch (promise._resolved) {
-    case 0:
-      const receiver = new Proxy(PENDING, arg1, arg2, arg3);
-      if (promise._receiver === undefined) {
-        promise._receiver = receiver;
-      } else {
-        if (!promise._receivers) {
-          promise._receivers = new Queue();
-        }
-        promise._receivers.push({ receiver });
-      }
-      return receiver._promise;
-    case 1:
-      return new Proxy(promise._value, arg1, arg2, arg3)._execute();
-    case 2:
-      return Aigle.reject(promise._value);
-  }
-}
-
-/**
- * @param {Object} opts
- * @param {boolean} [opts.longStackTraces]
- * @param {boolean} [opts.cancellation]
- */
-function config(opts) {
-  opts = opts || {};
-  if (opts.longStackTraces !== undefined) {
-    stackTraces = !!opts.longStackTraces;
-  }
-  if (opts.cancellation !== undefined) {
-    Aigle.prototype._execute = opts.cancellation ? executeWithCancel : execute;
-  }
-}
-
-function longStackTraces() {
-  stackTraces = true;
-}
-
-/**
- * Add functions which sources has to the Aigle class functions and static functions.
- * The functions will be converted asynchronous functions.
- * If an extended function returns a promise instance, the function will wait until the promise is resolved.
- *
- * @param {Object} sources
- * @param {Object} [opts]
- * @param {boolean} [opts.promisify=true]
- * @param {boolean} [opts.override=false]
- * @example
- * Aigle.mixin(require('lodash'));
- * const array = [1, 2, 3];
- * return Aigle.map(array, n => Aigle.delay(10, n * 2))
- *   .sum()
- *   .then(value => {
- *     console.log(value; // 12
- *   });
- *
- * @example
- * Aigle.mixin(require('lodash'));
- * const array = [1.1, 1.4, 2.2];
- * return Aigle.map(array, n => Aigle.delay(10, n * 2))
- *   .uniqBy(n => Aigle.delay(10, Math.floor(n))
- *   .then(array => {
- *     console.log(array; // [2.2, 4.4]
- *   });
- */
-function mixin(sources, opts = {}) {
-  const { override, promisify = true } = opts;
-  Object.getOwnPropertyNames(sources).forEach(key => {
-    const func = sources[key];
-    if (typeof func !== 'function' || (Aigle[key] && !override)) {
-      return;
-    }
-    // check lodash chain
-    if (key === 'chain') {
-      const obj = func();
-      if (obj && obj.__chain__) {
-        Aigle.chain = _resolve;
-        Aigle.prototype.value = function() {
-          return this;
-        };
-        return;
-      }
-    }
-    const Proxy = createProxy(func, promisify);
-    Aigle[key] = function(value, arg1, arg2, arg3) {
-      return new Proxy(value, arg1, arg2, arg3)._execute();
-    };
-    Aigle.prototype[key] = function(arg1, arg2, arg3) {
-      return addProxy(this, Proxy, arg1, arg2, arg3);
-    };
-  });
-  return Aigle;
-}
-
-
-/***/ }),
-
-/***/ 3351:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const {
-  INTERNAL,
-  PENDING,
-  iteratorSymbol,
-  promiseArrayEach,
-  promiseSetEach
-} = __nccwpck_require__(1783);
-const { callResolve } = __nccwpck_require__(466);
-
-class All extends AigleProxy {
-  constructor(coll) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._rest = undefined;
-    this._result = undefined;
-    if (coll === PENDING) {
-      this._callResolve = this._set;
-    } else {
-      this._callResolve = undefined;
-      this._set(coll);
-    }
-  }
-
-  _set(coll) {
-    if (Array.isArray(coll)) {
-      const size = coll.length;
-      this._rest = size;
-      this._result = Array(size);
-      this._callResolve = callResolve;
-      promiseArrayEach(this, size, coll);
-    } else if (coll[iteratorSymbol]) {
-      const { size } = coll;
-      this._rest = size;
-      this._result = Array(size);
-      this._callResolve = callResolve;
-      promiseSetEach(this, Infinity, coll);
-    } else {
-      this._rest = 0;
-      this._result = [];
-    }
-    if (this._rest === 0) {
-      this._promise._resolve(this._result);
-    }
-    return this;
-  }
-
-  _execute() {
-    return this._promise;
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { all, All };
-
-/**
- * `Aigle.all` is almost the same functionality as `Promise.all`.
- * It will return an Aigle instance.
- * @param {Array} array
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const makeDelay = (num, delay) => {
- *   return Aigle.delay(delay)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.all([
- *   makeDelay(1, 30),
- *   makeDelay(2, 20),
- *   makeDelay(3, 10)
- * ])
- * .then(array => {
- *   console.log(array); // [1, 2, 3];
- *   console.log(order); // [3, 2, 1];
- * });
- */
-function all(array) {
-  return new All(array)._promise;
-}
-
-
-/***/ }),
-
-/***/ 5490:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Parallel } = __nccwpck_require__(8176);
-
-class AllSettled extends Parallel {
-  _set(coll) {
-    this._errorSet = new Set();
-    this._promise._resolve = createResolve(this);
-    super._set(coll);
-  }
-
-  _callReject(reason, key) {
-    this._errorSet.add(key);
-    this._callResolve(reason, key);
-    return true;
-  }
-}
-
-function createResolve(proxy) {
-  const { _errorSet, _promise } = proxy;
-  const { _resolve } = _promise;
-  return result => {
-    if (Array.isArray(result)) {
-      result = result.map(iterator);
-    } else if (result instanceof Map) {
-      const map = result;
-      result = map;
-      map.forEach((val, key) => result.set(key, iterator(val, key)));
-    } else {
-      Object.entries(result).forEach(([key, val]) => (result[key] = iterator(val, key)));
-    }
-    _resolve.call(_promise, result);
-  };
-  function iterator(res, key) {
-    return _errorSet.has(key)
-      ? { state: 'rejected', reason: res }
-      : { state: 'fulfilled', value: res };
-  }
-}
-
-module.exports = { allSettled, AllSettled };
-
-/**
- * Return an Aigle instance
- * @param {Array|Object} collection - it should be an array/object of functions or Promise instances
- * @example
- * Aigle.allSettled([
- *   Aigle.resolve(1),
- *   Aigle.reject(2),
- *   Aigle.reject(3)
- * ])
- * .then(array => {
- *   console.log(array); // [{ state: 'fulfilled', value: 1 }, { state: 'rejected', reason: 2 }, { state: 'rejected', reason: 3 }]
- * });
- */
-function allSettled(collection) {
-  return new AllSettled(collection)._promise;
-}
-
-
-/***/ }),
-
-/***/ 8108:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, callResolve } = __nccwpck_require__(1783);
-
-module.exports = attempt;
-
-/**
- * @param {function} handler
- * @return {Aigle} Returns an Aigle instance
- * @example
- * Aigle.attempt(() => {
- *     throw Error('error');
- *   })
- *   .catch(error => console.log(error)); // error
- */
-function attempt(handler) {
-  const receiver = new Aigle(INTERNAL);
-  callResolve(receiver, handler);
-  return receiver;
-}
-
-
-/***/ }),
-
-/***/ 214:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { concatArray } = __nccwpck_require__(1783);
-const { setParallel } = __nccwpck_require__(6198);
-
-class Concat extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-
-  _callResolve(value, index) {
-    this._result[index] = value;
-    if (--this._rest === 0) {
-      this._promise._resolve(concatArray(this._result));
-    }
-  }
-}
-
-module.exports = { concat, Concat };
-
-function set(collection) {
-  setParallel.call(this, collection);
-  this._result = Array(this._rest);
-  return this;
-}
-
-/**
- * `Aigle.concat` has almost the same functionality as `Array#concat`.
- * It iterates all elements of `collection` and executes `iterator` using each element on parallel.
- * The `iterator` needs to return a promise or something.
- * If a promise is returned, the function will wait until the promise is fulfilled.
- * Then the result will be assigned to an array, the role is the same as `Array#concat`.
- * All of them are finished, the function will return an array as a result.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.concat(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 4];
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.concat(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 4];
- *     console.log(order); // [1, 2, 4];
- *   });
- */
-function concat(collection, iterator) {
-  return new Concat(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 2798:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { concatArray } = __nccwpck_require__(1783);
-const { setLimit } = __nccwpck_require__(6198);
-
-class ConcatLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-  }
-
-  _callResolve(value, index) {
-    this._result[index] = value;
-    if (--this._rest === 0) {
-      this._promise._resolve(concatArray(this._result));
-    } else if (this._callRest-- > 0) {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { concatLimit, ConcatLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._result = Array(this._rest);
-  return this;
-}
-
-/**
- * `Aigle.concatLimit` is almost the as [`Aigle.concat`](https://suguru03.github.io/aigle/docs/Aigle.html#concat) and
- * [`Aigle.concatSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#concatSeries), but it will work with concurrency.
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.concatLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 3, 5, 2, 4];
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = {
- *   task1: 1,
- *   task2: 5,
- *   task3: 3,
- *   task4: 4,
- *   task5: 2
- * };
- * const iterator = (num, key, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.concatLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 3, 5, 2, 4];
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.concatLimit(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 3, 4, 5];
- *     console.log(order); // [1, 2, 3, 4, 5];
- *   });
- */
-function concatLimit(collection, limit, iterator) {
-  return new ConcatLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 5715:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-
-class ConcatSeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator);
-    this._result = [];
-  }
-
-  _callResolve(value) {
-    if (Array.isArray(value)) {
-      this._result.push(...value);
-    } else if (value !== undefined) {
-      this._result.push(value);
-    }
-    if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { concatSeries, ConcatSeries };
-
-/**
- * `Aigle.concatSeries` is almost the as [`Aigle.concat`](https://suguru03.github.io/aigle/docs/Aigle.html#concat), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.concatSeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 4, 2];
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.concatSeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 4, 2];
- *     console.log(order); // [1, 4, 2];
- *   });
- */
-function concatSeries(collection, iterator) {
-  return new ConcatSeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 7119:
-/***/ ((module) => {
-
-"use strict";
-
-
-module.exports = {
-  resolveStack,
-  reconstructStack
-};
-
-function resolveStack(promise) {
-  Error.captureStackTrace(promise);
-}
-
-function reconstructStack(promise) {
-  const { stack, _value } = promise;
-  if (_value instanceof Error === false || !stack) {
-    return;
-  }
-  if (!_value._reconstruct) {
-    _value.stack = reconstruct(_value.stack).join('\n');
-    _value._reconstruct = true;
-  }
-  const stacks = reconstruct(stack);
-  stacks[0] = '\nFrom previous event:';
-  _value.stack += stacks.join('\n');
-}
-
-function reconstruct(stack) {
-  const result = [];
-  const stacks = stack.split('\n');
-  for (let i = 0; i < stacks.length; i++) {
-    const s = stacks[i];
-    if (/node_modules/.test(s)) {
-      continue;
-    }
-    result.push(s);
-  }
-  return result;
-}
-
-
-/***/ }),
-
-/***/ 9554:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL } = __nccwpck_require__(1783);
-
-class Delay extends Aigle {
-  constructor(ms) {
-    super(INTERNAL);
-    this._ms = ms;
-    this._timer = undefined;
-  }
-
-  _resolve(value) {
-    this._timer = setTimeout(() => Aigle.prototype._resolve.call(this, value), this._ms);
-    return this;
-  }
-
-  _reject(reason) {
-    clearTimeout(this._timer);
-    Aigle.prototype._reject.call(this, reason);
-  }
-}
-
-module.exports = { delay, Delay };
-
-/**
- * Return a promise which will be resolved with `value` after `ms`.
- * @param {number} ms
- * @param {*} value
- * @return {Aigle} Returns an Aigle instance
- * @example
- * Aigle.delay(10)
- *   .then(value => console.log(value); // undefined
- *
- * @example
- * Aigle.delay(10, 'test')
- *   .then(value => console.log(value); // 'test'
- */
-function delay(ms, value) {
-  return new Delay(ms)._resolve(value);
-}
-
-
-/***/ }),
-
-/***/ 2969:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { DoWhilst } = __nccwpck_require__(2546);
-const { UntilTester } = __nccwpck_require__(1891);
-
-module.exports = doUntil;
-
-/**
- * @param {*} [value]
- * @param {Function} iterator
- * @param {Function} tester
- * @return {Aigle} Returns an Aigle instance
- * @example
- * let count = 0;
- * const order = [];
- * const tester = num => {
- *   order.push(`t:${num}`);
- *   return Aigle.delay(10)
- *     .then(() => num === 4);
- * };
- * const iterator = () => {
- *   const num = ++count;
- *   order.push(`i:${num}`);
- *   return Aigle.delay(10)
- *     .then(() => num);
- * };
- * Aigle.doUntil(iterator, tester)
- *   .then(value => {
- *     console.log(value); // 4
- *     console.log(count); // 4
- *     console.log(order); // [ 'i:1', 't:1', 'i:2', 't:2', 'i:3', 't:3', 'i:4', 't:4' ]
- *   });
- *
- * @example
- * const order = [];
- * const tester = num => {
- *   order.push(`t:${num}`);
- *   return Aigle.delay(10)
- *     .then(() => num === 4);
- * };
- * const iterator = count => {
- *   const num = ++count;
- *   order.push(`i:${num}`);
- *   return Aigle.delay(10)
- *     .then(() => num);
- * };
- * Aigle.doUntil(0, iterator, tester)
- *   .then(value => {
- *     console.log(value); // 4
- *     console.log(order); // [ 'i:1', 't:1', 'i:2', 't:2', 'i:3', 't:3', 'i:4', 't:4' ]
- *   });
- */
-function doUntil(value, iterator, tester) {
-  if (typeof tester !== 'function') {
-    tester = iterator;
-    iterator = value;
-    value = undefined;
-  }
-  return new DoWhilst(new UntilTester(tester), iterator)._iterate(value);
-}
-
-
-/***/ }),
-
-/***/ 2546:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleWhilst, WhilstTester } = __nccwpck_require__(2043);
-
-class DoWhilst extends AigleWhilst {
-  constructor(test, iterator) {
-    super(test, iterator);
-  }
-
-  _iterate(value) {
-    this._next(value);
-    return this._promise;
-  }
-}
-
-module.exports = { doWhilst, DoWhilst };
-
-/**
- * @param {*} [value]
- * @param {Function} iterator
- * @param {Function} tester
- * @return {Aigle} Returns an Aigle instance
- * @example
- * let count = 0;
- * const order = [];
- * const tester = num => {
- *   order.push(`t:${num}`);
- *   return Aigle.delay(10)
- *     .then(() => num !== 4);
- * };
- * const iterator = () => {
- *   const num = ++count;
- *   order.push(`i:${num}`);
- *   return Aigle.delay(10)
- *     .then(() => num);
- * };
- * Aigle.doWhilst(iterator, tester)
- *   .then(value => {
- *     console.log(value); // 4
- *     console.log(count); // 4
- *     console.log(order); // [ 'i:1', 't:1', 'i:2', 't:2', 'i:3', 't:3', 'i:4', 't:4' ]
- *   });
- *
- * @example
- * const order = [];
- * const tester = num => {
- *   order.push(`t:${num}`);
- *   return Aigle.delay(10)
- *     .then(() => num !== 4);
- * };
- * const iterator = count => {
- *   const num = ++count;
- *   order.push(`i:${num}`);
- *   return Aigle.delay(10)
- *     .then(() => num);
- * };
- * Aigle.doWhilst(0, iterator, tester)
- *   .then(value => {
- *     console.log(value); // 4
- *     console.log(order); // [ 'i:1', 't:1', 'i:2', 't:2', 'i:3', 't:3', 'i:4', 't:4' ]
- *   });
- */
-function doWhilst(value, iterator, tester) {
-  if (typeof tester !== 'function') {
-    tester = iterator;
-    iterator = value;
-    value = undefined;
-  }
-  return new DoWhilst(new WhilstTester(tester), iterator)._iterate(value);
-}
-
-
-/***/ }),
-
-/***/ 4881:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, PENDING } = __nccwpck_require__(1783);
-const { execute, setParallel } = __nccwpck_require__(6198);
-
-class Each extends AigleProxy {
-  constructor(collection, iterator, set = setDefault) {
-    super();
-    this._iterator = iterator;
-    this._promise = new Aigle(INTERNAL);
-    this._coll = undefined;
-    this._size = undefined;
-    this._rest = undefined;
-    this._keys = undefined;
-    this._result = undefined;
-    this._iterate = undefined;
-    if (collection === PENDING) {
-      this._set = set;
-      this._iterate = this._callResolve;
-      this._callResolve = execute;
-    } else {
-      set.call(this, collection);
-    }
-  }
-
-  _execute() {
-    if (this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      this._iterate();
-    }
-    return this._promise;
-  }
-
-  _callResolve(value) {
-    if (--this._rest === 0 || value === false) {
-      this._promise._resolve(this._result);
-    }
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { each, Each };
-
-function setDefault(collection) {
-  setParallel.call(this, collection);
-  this._result = collection;
-  return this;
-}
-
-/**
- * `Aigle.each` iterates all elements of `collection` and execute `iterator` for each element on parallel.
- * The iterator is called with three arguments. (value, index|key, collection)
- * If the iterator returns `false` or a promise which has `false` as a result, the promise state will be `onFulfilled` immediately.
- * ⚠ All elements are already executed and can't be stopped. If you care about it, you should use [`Aigle.eachSeries`](https://suguru03.github.io/aigle/docs/global.html#eachSeries).
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- *   const order = [];
- *   const collection = [1, 4, 2];
- *   const iterator = (num, index, collection) => {
- *     return Aigle.delay(num * 10)
- *       .then(() => order.push(num));
- *   };
- *   return Aigle.each(collection, iterator)
- *     .then(value => {
- *       console.log(value); // undefined
- *       console.log(order); // [1, 2, 4];
- *     });
- *
- * @example
- *   const order = [];
- *   const collection = { a: 1, b: 4, c: 2 };
- *   const iterator = (num, key, collection) => {
- *     return Aigle.delay(num * 10)
- *       .then(() => order.push(num));
- *   };
- *   return Aigle.each(collection, iterator)
- *     .then(value => {
- *       console.log(value); // undefined
- *       console.log(order); // [1, 2, 4];
- *     });
- *
- * @example
- *    const order = [];
- *    const collection = [1, 4, 2];
- *    const iterator = (num, index, collection) => {
- *      return Aigle.delay(num * 10)
- *        .then(() => {
- *          order.push(num);
- *          return num !== 2; // break
- *        });
- *    };
- *    return Aigle.each(collection, iterator)
- *      .then(value => {
- *        console.log(value); // undefined
- *        console.log(order); // [1, 2];
- *      });
- */
-function each(collection, iterator) {
-  return new Each(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 2765:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { DEFAULT_LIMIT, INTERNAL, PENDING } = __nccwpck_require__(1783);
-const { execute, setLimit } = __nccwpck_require__(6198);
-
-class EachLimit extends AigleProxy {
-  constructor(collection, limit, iterator, set = setDefault) {
-    super();
-    if (typeof limit === 'function') {
-      iterator = limit;
-      limit = DEFAULT_LIMIT;
-    }
-    this._iterator = iterator;
-    this._promise = new Aigle(INTERNAL);
-    this._index = 0;
-    this._limit = limit;
-    this._coll = undefined;
-    this._rest = undefined;
-    this._size = undefined;
-    this._keys = undefined;
-    this._result = undefined;
-    this._iterate = undefined;
-    this._callRest = undefined;
-    if (collection === PENDING) {
-      this._set = set;
-      this._iterate = this._callResolve;
-      this._callResolve = execute;
-    } else {
-      set.call(this, collection);
-    }
-  }
-
-  _execute() {
-    if (this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      while (this._limit--) {
-        this._iterate();
-      }
-    }
-    return this._promise;
-  }
-
-  _callResolve(value) {
-    if (value === false) {
-      this._callRest = 0;
-      this._promise._resolve(this._result);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else if (this._callRest-- > 0) {
-      this._iterate();
-    }
-  }
-
-  _callReject(reason) {
-    this._callRest = 0;
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { eachLimit, EachLimit };
-
-function setDefault(collection) {
-  setLimit.call(this, collection);
-  this._result = collection;
-  return this;
-}
-
-/**
- * `Aigle.eachLimit` is almost same as [`Aigle.each`](https://suguru03.github.io/aigle/docs/Aigle.html#each)
- *  and [`Aigle.eachSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#eachSeries),
- *  but it will work with concurrency.
- * `limit` is concurrency, if it is not defined, concurrency is 8.
- * @param {Array|Object} A - collection to iterate over
- * @param {integer} [limit=8] - It is concurrncy, default is 8
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.eachLimit(collection, 2, iterator)
- *   .then(value => {
- *     console.log(value); // undefined
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = {
- *   task1: 1,
- *   task2: 5,
- *   task3: 3,
- *   task4: 4,
- *   task5: 2
- * };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.eachLimit(collection, 2, iterator)
- *   .then(value => {
- *     console.log(value); // undefined
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.eachLimit(collection, iterator)
- *   .then(value => {
- *     console.log(value); // undefined
- *     console.log(order); // [1, 2, 3, 4, 5];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num !== 3;
- *     });
- * };
- * Aigle.eachLimit(collection, iterator)
- *   .then(value => {
- *     console.log(value); // undefined
- *     console.log(order); // [1, 2, 3];
- *   });
- */
-function eachLimit(collection, limit, iterator) {
-  return new EachLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 9508:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, PENDING } = __nccwpck_require__(1783);
-const { execute, setSeries } = __nccwpck_require__(6198);
-
-class EachSeries extends AigleProxy {
-  constructor(collection, iterator, set = setDefault) {
-    super();
-    this._iterator = iterator;
-    this._promise = new Aigle(INTERNAL);
-    this._index = 0;
-    this._coll = undefined;
-    this._rest = undefined;
-    this._size = undefined;
-    this._keys = undefined;
-    this._result = undefined;
-    this._iterate = undefined;
-    if (collection === PENDING) {
-      this._set = set;
-      this._iterate = this._callResolve;
-      this._callResolve = execute;
-    } else {
-      set.call(this, collection);
-    }
-  }
-
-  _execute() {
-    if (this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      this._iterate();
-    }
-    return this._promise;
-  }
-
-  _callResolve(value) {
-    if (--this._rest === 0 || value === false) {
-      this._promise._resolve(this._result);
-    } else {
-      this._iterate();
-    }
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { eachSeries, EachSeries };
-
-function setDefault(collection) {
-  setSeries.call(this, collection);
-  this._result = collection;
-  return this;
-}
-
-/**
- * `Aigle.eachSeries` is almost the same as [`Aigle.each`](https://suguru03.github.io/aigle/docs/Aigle.html#each), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => order.push(num));
- * };
- * Aigle.eachSeries(collection, iterator)
- *   .then(value => {
- *     console.log(value); // undefined
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => order.push(num));
- * };
- * Aigle.eachSeries(collection, iterator)
- *   .then(value => {
- *     console.log(value); // undefined
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num !== 4; // break
- *     });
- * };
- * Aigle.eachSeries(collection, iterator)
- *   .then(value => {
- *     console.log(value); // undefined
- *     console.log(order); // [1, 4];
- *   });
- */
-function eachSeries(collection, iterator) {
-  return new EachSeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 1519:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-
-const types = ['CancellationError', 'TimeoutError'];
-let l = types.length;
-while (l--) {
-  const name = types[l];
-  const Class = class extends Error {};
-  Class.prototype.name = name;
-  exports[name] = Class;
-}
-
-
-/***/ }),
-
-/***/ 1873:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { PENDING } = __nccwpck_require__(1783);
-const { setShorthand } = __nccwpck_require__(6198);
-
-class Every extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator);
-    this._result = true;
-    if (collection === PENDING) {
-      this._set = setShorthand;
-    } else {
-      setShorthand.call(this, collection);
-    }
-  }
-
-  _callResolve(value) {
-    if (!value) {
-      this._promise._resolve(false);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(true);
-    }
-  }
-}
-
-module.exports = { every, Every };
-
-/**
- * `Aigle.every` is similar to `Array#every`.
- * If all elements return truthly or a promise which has a truthly value as a result,
- * the result will be `true`, otherwise it will be `false`.
- * @param {Array|Object} collection
- * @param {Function|Array|Object|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return true;
- *     });
- * };
- * Aigle.every(collection, iterator)
- *   .then(value => {
- *     console.log(value); // true
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return true;
- *     });
- * };
- * Aigle.every(collection, iterator)
- *   .then(value => {
- *     console.log(value); // true
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return n % 2;
- *     });
- * };
- * Aigle.every(collection, iterator)
- *   .then(value => {
- *     console.log(value); // false
- *     console.log(order); // [1, 2];
- *   });
- *
- * @example
- * const collection = [{
- *  uid: 1, active: false
- * }, {
- *  uid: 4, active: true
- * }, {
- *  uid: 2, active: true
- * }];
- * Aigle.every(collection, 'active')
- *   .then(value => console.log(value)); // false
- *
- * @example
- * const collection = [{
- *  uid: 1, active: false
- * }, {
- *  uid: 4, active: true
- * }, {
- *  uid: 2, active: true
- * }];
- * Aigle.every(collection, ['active', true])
- *   .then(value => console.log(value)); // false
- *
- * @example
- * const collection = [{
- *  uid: 1, active: true
- * }, {
- *  uid: 4, active: true
- * }, {
- *  uid: 2, active: true
- * }];
- * Aigle.every(collection, { active: true })
- *   .then(value => console.log(value)); // true
- */
-function every(collection, iterator) {
-  return new Every(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 8235:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-
-class EveryLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator);
-    this._result = true;
-  }
-
-  _callResolve(value) {
-    if (!value) {
-      this._promise._resolve(false);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(true);
-    } else if (this._callRest-- > 0) {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { everyLimit, EveryLimit };
-
-/**
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return true;
- *     });
- * };
- * Aigle.everyLimit(collection, 2, iterator)
- *   .then(value => {
- *     console.log(value); // true
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = {
- *   task1: 1,
- *   task2: 5,
- *   task3: 3,
- *   task4: 4,
- *   task5: 2
- * };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return true;
- *     });
- * };
- * Aigle.everyLimit(collection, 2, iterator)
- *   .then(value => {
- *     console.log(value); // true
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num === 4;
- *     });
- * };
- * Aigle.everyLimit(collection, iterator)
- *   .then(value => {
- *     console.log(value); // false
- *     console.log(order); // [1, 2, 3, 4];
- *   });
- */
-function everyLimit(collection, limit, iterator) {
-  return new EveryLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 3727:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-
-class EverySeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator);
-    this._result = true;
-  }
-
-  _callResolve(value) {
-    if (!value) {
-      this._promise._resolve(false);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(true);
-    } else {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { everySeries, EverySeries };
-
-/**
- * `Aigle.everySeries` is almost the same as [`Aigle.every`](https://suguru03.github.io/aigle/docs/Aigle.html#every), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return true;
- *     });
- * };
- * Aigle.everySeries(collection, iterator)
- *   .then(value => {
- *     console.log(value); // true
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key, collection) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return true;
- *     });
- * };
- * Aigle.everySeries(collection, iterator)
- *   .then(value => {
- *     console.log(value); // true
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return n % 2;
- *     });
- * };
- * Aigle.everySeries(collection, iterator)
- *   .then(value => {
- *     console.log(value); // false
- *     console.log(order); // [1, 4];
- *   });
- */
-function everySeries(collection, iterator) {
-  return new EverySeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 3940:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-const { INTERNAL, compactArray } = __nccwpck_require__(1783);
-
-class Filter extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-Filter.prototype._set = set;
-
-module.exports = { filter, Filter };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  this._result = Array(this._rest);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  this._result[index] = value ? this._coll[index] : INTERNAL;
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  }
-}
-
-function callResolveObject(value, index) {
-  this._result[index] = value ? this._coll[this._keys[index]] : INTERNAL;
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  }
-}
-
-/**
- * `Aigle.filter` has almost the same functionality as `Array#filter`.
- * It iterates all elements of `collection` and executes `iterator` using each element on parallel.
- * The `iterator` needs to return a promise or something.
- * If a promise is returned, the function will wait until the promise is fulfilled.
- * If the result is falsy, the element will be removed.
- * All of them are finished, the function will return an array as a result.
- * @param {Array|Object} collection
- * @param {Function|Array|Object|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.filter(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1];
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.filter(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1];
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.filter(collection, 'active')
- *   .then(array => {
- *     console.log(array); // [{ name: 'fread', active: true }]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.filter(collection, ['name', 'fread'])
- *   .then(array => {
- *     console.log(array); // [{ name: 'fread', active: true }]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.filter(collection, { name: 'fread', active: true })
- *   .then(array => {
- *     console.log(array); // [{ name: 'fread', active: true }]
- *   });
- */
-function filter(collection, iterator) {
-  return new Filter(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 7699:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-const { INTERNAL, compactArray } = __nccwpck_require__(1783);
-
-class FilterLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-  }
-}
-
-module.exports = { filterLimit, FilterLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._result = Array(this._rest);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  this._result[index] = value ? this._coll[index] : INTERNAL;
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  this._result[index] = value ? this._coll[this._keys[index]] : INTERNAL;
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.filterLimit` is almost the as [`Aigle.filter`](https://suguru03.github.io/aigle/docs/Aigle.html#filter) and
- * [`Aigle.filterSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#filterSeries), but it will work with concurrency.
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.filterLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 5, 3];
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = {
- *   task1: 1,
- *   task2: 5,
- *   task3: 3,
- *   task4: 4,
- *   task5: 2
- * };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.filterLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 5, 3];
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.filterLimit(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 5, 3];
- *     console.log(order); // [1, 2, 3, 4, 5];
- *   });
- */
-function filterLimit(collection, limit, iterator) {
-  return new FilterLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 8569:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-const { INTERNAL, compactArray } = __nccwpck_require__(1783);
-
-class FilterSeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-module.exports = { filterSeries, FilterSeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._result = Array(this._rest);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  this._result[index] = value ? this._coll[index] : INTERNAL;
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  } else {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  this._result[index] = value ? this._coll[this._keys[index]] : INTERNAL;
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  } else {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.filterSeries` is almost the as [`Aigle.filter`](https://suguru03.github.io/aigle/docs/Aigle.html#filter), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.filterSeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1];
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.filterSeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1];
- *     console.log(order); // [1, 4, 2];
- *   });
- */
-function filterSeries(collection, iterator) {
-  return new FilterSeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 9919:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-
-class Find extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-module.exports = { find, Find };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._size = 0;
-    this._promise._resolve(this._coll[index]);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    this._size = 0;
-    this._promise._resolve(this._coll[this._keys[index]]);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  }
-}
-
-/**
- * `Aigle.find` has almost the same functionality as `Array#find`.
- * It iterates all elements of `collection` and executes `iterator` using each element on parallel.
- * The `iterator` needs to return a promise or something.
- * If a promise is returned, the function will wait until the promise is fulfilled.
- * If the result is truthly, the element will be returned as a result.
- * @param {Array|Object} collection
- * @param {Function|Array|Object|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.find(collection, iterator)
- *   .then(value => {
- *     console.log(value); // 2
- *     console.log(order); // [1, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.find(collection, iterator)
- *   .then(value => {
- *     console.log(value); // 2
- *     console.log(order); // [1, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return false;
- *     });
- * };
- * Aigle.find(collection, iterator)
- *   .then(value => {
- *     console.log(value); // undefined
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.find(collection, 'active')
- *   .then(object => {
- *     console.log(object); // { name: 'fread', active: true }
- *   });
- *
- * @example
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.find(collection, ['name', 'fread'])
- *   .then(object => {
- *     console.log(object); // { name: 'fread', active: true }
- *   });
- *
- * @example
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.find(collection, { name: 'fread', active: true })
- *   .then(object => {
- *     console.log(object); // { name: 'fread', active: true }
- *   });
- */
-function find(collection, iterator) {
-  return new Find(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 3516:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-
-class FindIndex extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-    this._result = -1;
-  }
-
-  _callResolve(value, index) {
-    if (value) {
-      this._size = 0;
-      this._promise._resolve(index);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(-1);
-    }
-  }
-}
-
-module.exports = { findIndex, FindIndex };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  if (this._keys !== undefined) {
-    this._rest = 0;
-  }
-  return this;
-}
-
-/**
- * `Aigle.findIndex` is like `Aigle.find`, it will return the index of the first element which the iterator returns truthy.
- * @param {Array} collection
- * @param {Function|Array|Object|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.findIndex(collection, iterator)
- *   .then(index => {
- *     console.log(index); // 2
- *     console.log(order); // [1, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return false;
- *     });
- * };
- * Aigle.findIndex(collection, iterator)
- *   .then(index => {
- *     console.log(index); // -1
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.findIndex(collection, 'active')
- *   .then(index => {
- *     console.log(index); // 1
- *   });
- *
- * @example
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.findIndex(collection, ['name', 'fread'])
- *   .then(index => {
- *     console.log(index); // true
- *   });
- *
- * @example
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.find(collection, { name: 'fread', active: true })
- *   .then(index => {
- *     console.log(index); // 1
- *   });
- */
-function findIndex(collection, iterator) {
-  return new FindIndex(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 6288:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-
-class FindIndexLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-    this._result = -1;
-  }
-
-  _callResolve(value, index) {
-    if (value) {
-      this._callRest = 0;
-      this._promise._resolve(index);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(-1);
-    } else if (this._callRest-- > 0) {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { findIndexLimit, FindIndexLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  if (this._keys !== undefined) {
-    this._rest = 0;
-  }
-  return this;
-}
-
-/**
- * `Aigle.findIndexLimit` is almost the as [`Aigle.findIndex`](https://suguru03.github.io/aigle/docs/Aigle.html#findIndex) and
- * [`Aigle.findIndexSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#findIndexSeries), but it will work with concurrency.
- * @param {Array} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.findIndexLimit(collection, 2, iterator)
- *   .then(index => {
- *     console.log(index); // 4
- *     console.log(order); // [1, 3, 5, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.findIndexLimit(collection, iterator)
- *   .then(index => {
- *     console.log(index); // 4
- *     console.log(order); // [1, 2];
- *   });
- */
-function findIndexLimit(collection, limit, iterator) {
-  return new FindIndexLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 22:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-
-class FindIndexSeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-    this._result = -1;
-  }
-  _callResolve(value, index) {
-    if (value) {
-      this._promise._resolve(index);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(-1);
-    } else {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { findIndexSeries, FindIndexSeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  if (this._keys !== undefined) {
-    this._rest = 0;
-  }
-  return this;
-}
-
-/**
- * `Aigle.findIndexSeries` is almost the as [`Aigle.findIndex`](https://suguru03.github.io/aigle/docs/Aigle.html#findIndex), but it will work in series.
- * @param {Array} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.findIndexSeries(collection, iterator)
- *   .then(index => {
- *     console.log(index); // 1
- *     console.log(order); // [1, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return false;
- *     });
- * };
- * Aigle.findIndexSeries(collection, iterator)
- *   .then(index => {
- *     console.log(index); // -1
- *     console.log(order); // [1, 4, 2];
- *   });
- */
-function findIndexSeries(collection, iterator) {
-  return new FindIndexSeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 4597:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-
-class FindKey extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-module.exports = { findKey, FindKey };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._size = 0;
-    this._promise._resolve(`${index}`);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    this._size = 0;
-    this._promise._resolve(this._keys[index]);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  }
-}
-
-/**
- * @param {Array|Object} collection
- * @param {Function|Array|Object|string} iterator
- * @return {Aigle} Returns an Aigle instance
- */
-function findKey(collection, iterator) {
-  return new FindKey(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 9410:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-
-class FindKeyLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-  }
-}
-
-module.exports = { findKeyLimit, FindKeyLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._callRest = 0;
-    this._promise._resolve(`${index}`);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    this._callRest = 0;
-    this._promise._resolve(this._keys[index]);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-/**
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- */
-function findKeyLimit(collection, limit, iterator) {
-  return new FindKeyLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 7271:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-
-class FindKeySeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-module.exports = { findKeySeries, FindKeySeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._promise._resolve(`${index}`);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  } else {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    this._promise._resolve(this._keys[index]);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  } else {
-    this._iterate();
-  }
-}
-
-/**
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- */
-function findKeySeries(collection, iterator) {
-  return new FindKeySeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 3784:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-
-class FindLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-  }
-}
-
-module.exports = { findLimit, FindLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._callRest = 0;
-    this._promise._resolve(this._coll[index]);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    this._callRest = 0;
-    this._promise._resolve(this._coll[this._keys[index]]);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.findLimit` is almost the as [`Aigle.find`](https://suguru03.github.io/aigle/docs/Aigle.html#find) and
- * [`Aigle.findSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#findSeries), but it will work with concurrency.
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.findLimit(collection, 2, iterator)
- *   .then(value => {
- *     console.log(value); // 2
- *     console.log(order); // [1, 3, 5, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.findLimit(collection, 2, iterator)
- *   .then(value => {
- *     console.log(value); // 2
- *     console.log(order); // [1, 3, 5, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.findLimit(collection, iterator)
- *   .then(value => {
- *     console.log(value); // 2
- *     console.log(order); // [1, 2];
- *   });
- */
-function findLimit(collection, limit, iterator) {
-  return new FindLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 6110:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-
-class FindSeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-module.exports = { findSeries, FindSeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._promise._resolve(this._coll[index]);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  } else {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    this._promise._resolve(this._coll[this._keys[index]]);
-  } else if (--this._rest === 0) {
-    this._promise._resolve();
-  } else {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.findSeries` is almost the as [`Aigle.find`](https://suguru03.github.io/aigle/docs/Aigle.html#find), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.findSeries(collection, iterator)
- *   .then(value => {
- *     console.log(value); // 4
- *     console.log(order); // [1, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.findSeries(collection, iterator)
- *   .then(value => {
- *     console.log(value); // 4
- *     console.log(order); // [1, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return false;
- *     });
- * };
- * Aigle.findSeries(collection, iterator)
- *   .then(value => {
- *     console.log(value); // undefined
- *     console.log(order); // [1, 4, 2];
- *   });
- */
-function findSeries(collection, iterator) {
-  return new FindSeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 8027:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const Aigle = __nccwpck_require__(5306);
-
-module.exports = flow;
-
-/**
- * @param {Function[]} funcs
- * @return {Function} Returns the new composite function
- * @example
- *   const add = (a, b) => Aigle.delay(10, a + b);
- *   const square = n => Aigle.delay(10, n * n);
- *   const addSquare = Aigle.flow(add, square);
- *   return addSquare(1, 2).then(value => {
- *     console.log(value); // 9
- *   });
- */
-function flow(...funcs) {
-  const [handler = thru, ...handlers] = flatArray(funcs);
-  return (...args) =>
-    Aigle.resolve(handler(...args)).then(data =>
-      Aigle.reduce(handlers, (acc, func) => func(acc), data)
-    );
-}
-
-function thru(arg) {
-  return arg;
-}
-
-function flatArray(args) {
-  const l = args.length;
-  const array = [];
-  let i = -1;
-  while (++i < l) {
-    const arg = args[i];
-    Array.isArray(arg) ? array.push(...arg) : array.push(arg);
-  }
-  return array;
-}
-
-
-/***/ }),
-
-/***/ 9696:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-
-class GroupBy extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { groupBy, GroupBy };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(key, index) {
-  if (this._result[key]) {
-    this._result[key].push(this._coll[index]);
-  } else {
-    this._result[key] = [this._coll[index]];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-function callResolveObject(key, index) {
-  if (this._result[key]) {
-    this._result[key].push(this._coll[this._keys[index]]);
-  } else {
-    this._result[key] = [this._coll[this._keys[index]]];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-/**
- * @param {Array|Object} collection
- * @param {Function|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.groupBy(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': [2, 4], '1': [1] };
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.groupBy(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': [2, 4], '1': [1] };
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = ['one', 'two', 'three'];
- * Aigle.groupBy(collection, 'length')
- *   .then(object => {
- *     console.log(object); // { '3': ['one', 'two'], '5': ['three'] };
- *   });
- *
- * @example
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.groupBy(collection, ['active', true])
- *   .then(object => {
- *     console.log(object);
- *     // { 'true': [{ name: 'fread', active: true }], 'false': [{ name: 'bargey', active: false }];
- *   });
- *
- * @example
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.groupBy(collection, { active: true })
- *   .then(object => {
- *     console.log(object);
- *     // { 'true': [{ name: 'fread', active: true }], 'false': [{ name: 'bargey', active: false }];
- *   });
- */
-function groupBy(collection, iterator) {
-  return new GroupBy(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 9300:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-
-class GroupByLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { groupByLimit, GroupByLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(key, index) {
-  if (this._result[key]) {
-    this._result[key].push(this._coll[index]);
-  } else {
-    this._result[key] = [this._coll[index]];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-function callResolveObject(key, index) {
-  if (this._result[key]) {
-    this._result[key].push(this._coll[this._keys[index]]);
-  } else {
-    this._result[key] = [this._coll[this._keys[index]]];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-/**
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.groupByLimit(collection, 2, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': [2, 4], '1': [1, 3, 5] };
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = {
- *   task1: 1,
- *   task2: 5,
- *   task3: 3,
- *   task4: 4,
- *   task5: 2
- * };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.groupByLimit(collection, 2, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': [2, 4], '1': [1, 3, 5] };
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.groupByLimit(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': [2, 4], '1': [1, 3, 5] };
- *     console.log(order); // [1, 2, 3, 4, 5];
- *   });
- */
-function groupByLimit(collection, limit, iterator) {
-  return new GroupByLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 8409:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-
-class GroupBySeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { groupBySeries, GroupBySeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(key, index) {
-  if (this._result[key]) {
-    this._result[key].push(this._coll[index]);
-  } else {
-    this._result[key] = [this._coll[index]];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else {
-    this._iterate();
-  }
-}
-
-function callResolveObject(key, index) {
-  if (this._result[key]) {
-    this._result[key].push(this._coll[this._keys[index]]);
-  } else {
-    this._result[key] = [this._coll[this._keys[index]]];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else {
-    this._iterate();
-  }
-}
-
-/**
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.groupBySeries(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': [4, 2], '1': [1] };
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.groupBySeries(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': [4, 2], '1': [1] };
- *     console.log(order); // [1, 4, 2];
- *   });
- */
-function groupBySeries(collection, iterator) {
-  return new GroupBySeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 2335:
-/***/ ((module) => {
-
-"use strict";
-
-
-const queue = Array(8);
-let len = 0;
-let ticked = false;
-
-function tick() {
-  let i = -1;
-  while (++i < len) {
-    const promise = queue[i];
-    queue[i] = undefined;
-    switch (promise._resolved) {
-      case 1:
-        promise._callResolve();
-        break;
-      case 2:
-        promise._callReject();
-        break;
-    }
-  }
-  len = 0;
-  ticked = false;
-}
-
-function invoke(promise) {
-  if (ticked === false) {
-    setImmediate(tick);
-    ticked = true;
-  }
-  queue[len++] = promise;
-}
-
-module.exports = invoke;
-
-
-/***/ }),
-
-/***/ 6198:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { call3, callProxyReciever } = __nccwpck_require__(1783);
-
-const [setParallel, setParallelWithOrder, setSeries] = [
-  [iterateArrayParallel, iterateObjectParallel],
-  [iterateArrayParallel, iterateObjectParallelWithOrder],
-  [iterateArraySeries, iterateObjectSeries]
-].map(createSet);
-
-const arrayIteratorList = [
-  iterateArrayParallel,
-  iterateArrayWithString,
-  iterateArrayWithObject,
-  iterateArrayWithArray
-];
-const objectIteratorList = [
-  iterateObjectParallel,
-  iterateObjectWithString,
-  iterateObjectWithObject,
-  iterateObjectWithArray
-];
-const [setShorthand, setShorthandWithOrder, setPickShorthand, setOmitShorthand] = [
-  [arrayIteratorList, objectIteratorList],
-  [arrayIteratorList, [iterateObjectParallelWithOrder, ...objectIteratorList.slice(1)]],
-  [
-    [...arrayIteratorList.slice(0, 3), iteratePickWithArray],
-    [...objectIteratorList.slice(0, 3), iteratePickWithArray]
-  ],
-  [
-    [...arrayIteratorList.slice(0, 3), iterateOmitWithArray],
-    [...objectIteratorList.slice(0, 3), iterateOmitWithArray]
-  ]
-].map(createSetShorthand);
-
-module.exports = {
-  execute,
-  setParallel,
-  setParallelWithOrder,
-  setShorthand,
-  setShorthandWithOrder,
-  setPickShorthand,
-  setOmitShorthand,
-  setSeries,
-  setLimit
-};
-
-function execute(collection) {
-  this._callResolve = this._iterate;
-  this._set(collection);
-  this._execute();
-}
-
-function createSet([iterateArray, iterateObject]) {
-  return function set(collection) {
-    if (Array.isArray(collection)) {
-      this._coll = collection;
-      this._size = collection.length;
-      this._iterate = iterateArray;
-    } else if (collection && typeof collection === 'object') {
-      const keys = Object.keys(collection);
-      this._coll = collection;
-      this._size = keys.length;
-      this._keys = keys;
-      this._iterate = iterateObject;
-    } else {
-      this._size = 0;
-    }
-    this._rest = this._size;
-    return this;
-  };
-}
-
-function createSetShorthand(list) {
-  const [getArrayIterator, getObjectIterator] = list.map(createIteratorGetter);
-  return function set(collection) {
-    if (Array.isArray(collection)) {
-      this._coll = collection;
-      this._size = collection.length;
-      this._iterate = getArrayIterator(this._iterator);
-    } else if (collection && typeof collection === 'object') {
-      const keys = Object.keys(collection);
-      this._coll = collection;
-      this._size = keys.length;
-      this._keys = keys;
-      this._iterate = getObjectIterator(this._iterator);
-    } else {
-      this._size = 0;
-    }
-    this._rest = this._size;
-    return this;
-  };
-}
-
-function createIteratorGetter([
-  iterateParallel,
-  iterateWithString,
-  iterateWithObject,
-  iterateWithArray
-]) {
-  return iterator => {
-    switch (typeof iterator) {
-      case 'function':
-        return iterateParallel;
-      case 'string':
-        return iterateWithString;
-      case 'object':
-        return Array.isArray(iterator) ? iterateWithArray : iterateWithObject;
-    }
-  };
-}
-
-function setLimit(collection) {
-  setSeries.call(this, collection);
-  const { _limit, _size } = this;
-  this._limit = _limit < _size ? _limit : _size;
-  this._callRest = _size - this._limit;
-  return this;
-}
-
-function iterateArrayParallel() {
-  const { _rest, _iterator, _coll } = this;
-  let i = -1;
-  while (++i < _rest && callProxyReciever(call3(_iterator, _coll[i], i, _coll), this, i)) {}
-}
-
-function iterateObjectParallel() {
-  const { _rest, _iterator, _coll, _keys } = this;
-  let i = -1;
-  while (++i < _rest) {
-    const key = _keys[i];
-    if (callProxyReciever(call3(_iterator, _coll[key], key, _coll), this, i) === false) {
-      break;
-    }
-  }
-}
-function iterateObjectParallelWithOrder() {
-  const { _rest, _iterator, _coll, _keys, _result } = this;
-  let i = -1;
-  while (++i < _rest) {
-    const key = _keys[i];
-    _result[key] = undefined;
-    if (callProxyReciever(call3(_iterator, _coll[key], key, _coll), this, i) === false) {
-      break;
-    }
-  }
-}
-
-function iterateArraySeries() {
-  const { _coll } = this;
-  const i = this._index++;
-  callProxyReciever(call3(this._iterator, _coll[i], i, _coll), this, i);
-}
-
-function iterateObjectSeries() {
-  const { _coll } = this;
-  const i = this._index++;
-  const key = this._keys[i];
-  callProxyReciever(call3(this._iterator, _coll[key], key, _coll), this, i);
-}
-
-function iterateArrayWithString() {
-  const { _iterator, _coll } = this;
-  let i = -1;
-  while (++i < this._size) {
-    const obj = _coll[i];
-    if (obj) {
-      this._callResolve(obj[_iterator], i);
-    } else {
-      this._callResolve(undefined, i);
-    }
-  }
-}
-
-function iterateObjectWithString() {
-  const { _iterator, _coll, _keys } = this;
-  let i = -1;
-  while (++i < this._size) {
-    const obj = _coll[_keys[i]];
-    if (obj) {
-      this._callResolve(obj[_iterator], i);
-    } else {
-      this._callResolve(undefined, i);
-    }
-  }
-}
-
-function iterateArrayWithArray() {
-  const { _coll } = this;
-  const [key, value] = this._iterator;
-  let i = -1;
-  while (++i < this._size) {
-    const obj = _coll[i];
-    if (obj) {
-      this._callResolve(obj[key] === value, i);
-    } else {
-      this._callResolve(undefined, i);
-    }
-  }
-}
-
-function iterateObjectWithArray() {
-  const { _coll, _keys } = this;
-  const [key, value] = this._iterator;
-  let i = -1;
-  while (++i < this._size) {
-    const obj = _coll[_keys[i]];
-    if (obj) {
-      this._callResolve(obj[key] === value, i);
-    } else {
-      this._callResolve(undefined, i);
-    }
-  }
-}
-
-function iterateArrayWithObject() {
-  const { _iterator: object, _coll } = this;
-  const keys = Object.keys(object);
-  let i = -1;
-  first: while (++i < this._size) {
-    const obj = _coll[i];
-    if (!obj) {
-      this._callResolve(undefined, i);
-      continue;
-    }
-    let l = keys.length;
-    while (l--) {
-      const key = keys[l];
-      if (obj[key] !== object[key]) {
-        this._callResolve(false, i);
-        continue first;
-      }
-    }
-    this._callResolve(true, i);
-  }
-}
-
-function iterateObjectWithObject() {
-  const { _iterator: object, _coll, _keys } = this;
-  const keys = Object.keys(object);
-  let i = -1;
-  first: while (++i < this._size) {
-    const obj = _coll[_keys[i]];
-    if (!obj) {
-      this._callResolve(undefined, i);
-      continue;
-    }
-    let l = keys.length;
-    while (l--) {
-      const key = keys[l];
-      if (obj[key] !== object[key]) {
-        this._callResolve(false, i);
-        continue first;
-      }
-    }
-    this._callResolve(true, i);
-  }
-}
-
-function iteratePickWithArray() {
-  const { _coll, _result } = this;
-  pick(this._iterator);
-  this._promise._resolve(_result);
-
-  function pick(array) {
-    let i = -1;
-    while (++i < array.length) {
-      const key = array[i];
-      if (Array.isArray(key)) {
-        pick(key);
-        continue;
-      }
-      if (_coll.hasOwnProperty(key)) {
-        _result[key] = _coll[key];
-      }
-    }
-  }
-}
-
-function iterateOmitWithArray() {
-  const { _coll, _result } = this;
-  const map = {};
-  createMap(this._iterator);
-  Object.keys(_coll).forEach(key => {
-    if (map.hasOwnProperty(key) === false) {
-      _result[key] = _coll[key];
-    }
-  });
-  this._promise._resolve(_result);
-
-  function createMap(array) {
-    let i = -1;
-    while (++i < array.length) {
-      const key = array[i];
-      if (Array.isArray(key)) {
-        createMap(key);
-        continue;
-      }
-      map[key] = true;
-    }
-  }
-}
-
-
-/***/ }),
-
-/***/ 3558:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { map } = __nccwpck_require__(352);
-const { mapValues } = __nccwpck_require__(1928);
-const { INTERNAL, PENDING, apply, callProxyReciever } = __nccwpck_require__(1783);
-
-module.exports = { createProxy };
-
-class MixinProxy extends AigleProxy {
-  constructor(func, exec, args) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._func = func;
-    this._args = args;
-    this._execute = exec;
-    if (args[0] === PENDING) {
-      this._set = this._callResolve;
-      this._callResolve = exec;
-    }
-  }
-
-  _callResolve(value) {
-    this._promise._resolve(value);
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-function execute(value) {
-  const { _args } = this;
-  if (_args[0] === PENDING) {
-    _args[0] = value;
-    this._callResolve = this._set;
-  }
-  callProxyReciever(apply(this._func, _args), this);
-  return this._promise;
-}
-
-function executeWithPromisify(value) {
-  const { _args } = this;
-  if (_args[0] === PENDING) {
-    _args[0] = value;
-    this._callResolve = this._set;
-  } else {
-    value = _args[0];
-  }
-  const iterator = _args[1];
-  const isFunc = typeof iterator === 'function';
-  if (isFunc && Array.isArray(value)) {
-    callIterator(this, map, array => {
-      let index = 0;
-      _args[1] = () => array[index++];
-      callProxyReciever(apply(this._func, _args), this);
-    });
-  } else if (isFunc && value && typeof value === 'object') {
-    callIterator(this, mapValues, object => {
-      let index = 0;
-      const keys = Object.keys(object);
-      _args[1] = () => object[keys[index++]];
-      callProxyReciever(apply(this._func, _args), this);
-    });
-  } else {
-    callProxyReciever(apply(this._func, _args), this);
-  }
-  return this._promise;
-}
-
-function callIterator(proxy, func, onFulfilled) {
-  const [collection, iterator] = proxy._args;
-  const p = func(collection, (value, key) => iterator(value, key, collection));
-  return p._resolved === 1
-    ? onFulfilled(p._value)
-    : p.then(onFulfilled, error => proxy._callReject(error));
-}
-
-/**
- * @private
- * @param {function} func
- * @param {boolean} promisify
- */
-function createProxy(func, promisify) {
-  const exec = promisify ? executeWithPromisify : execute;
-  return class extends MixinProxy {
-    constructor(...args) {
-      super(func, exec, args);
-    }
-  };
-}
-
-
-/***/ }),
-
-/***/ 9456:
-/***/ ((module) => {
-
-"use strict";
-
-
-class Queue {
-  constructor(size = 8) {
-    this.array = Array(size);
-    this.length = 0;
-  }
-
-  push(task) {
-    this.array[this.length++] = task;
-  }
-}
-
-module.exports = Queue;
-
-
-/***/ }),
-
-/***/ 1783:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleCore } = __nccwpck_require__(9058);
-const { version: VERSION } = __nccwpck_require__(1487);
-const DEFAULT_LIMIT = 8;
-const errorObj = { e: undefined };
-const iteratorSymbol = typeof Symbol === 'function' ? Symbol.iterator : function SYMBOL() {};
-const isNode =
-  typeof process === 'object' && Object.prototype.toString.call(process) === '[object process]';
-
-const iterators = [
-  createArrayIterator,
-  createObjectIterator,
-  createSetIterator,
-  createMapIterator
-].map(createIterator => [callProxyReciever, callProxyRecieverWithFunc].map(createIterator));
-
-const [
-  [, promiseArrayIterator],
-  [, promiseObjectIterator],
-  [, promiseSetIterator],
-  [, promiseMapIterator]
-] = iterators;
-const [
-  [promiseArrayEach, promiseArrayEachWithFunc],
-  [promiseObjectEach, promiseObjectEachWithFunc],
-  [promiseSetEach, promiseSetEachWithFunc],
-  [promiseMapEach, promiseMapEachWithFunc]
-] = [createArrayEach, createObjectEach, createSetEach, createMapEach].map((createEach, index) =>
-  iterators[index].map(createEach)
-);
-
-module.exports = {
-  VERSION,
-  DEFAULT_LIMIT,
-  INTERNAL,
-  PENDING,
-  UNHANDLED,
-  defaultIterator,
-  errorObj,
-  iteratorSymbol,
-  call0,
-  call1,
-  call3,
-  apply,
-  callResolve,
-  callReject,
-  callReceiver,
-  callThen,
-  callProxyReciever,
-  callProxyRecieverWithFunc,
-  promiseArrayIterator,
-  promiseArrayEach,
-  promiseArrayEachWithFunc,
-  promiseObjectIterator,
-  promiseObjectEach,
-  promiseObjectEachWithFunc,
-  promiseSetIterator,
-  promiseSetEach,
-  promiseSetEachWithFunc,
-  promiseMapIterator,
-  promiseMapEach,
-  promiseMapEachWithFunc,
-  compactArray,
-  concatArray,
-  clone,
-  createEmptyObject,
-  sortArray,
-  sortObject,
-  printWarning
-};
-
-function INTERNAL() {}
-
-function PENDING() {}
-
-function UNHANDLED() {}
-
-function defaultIterator(n) {
-  return n;
-}
-
-function call0(handler) {
-  try {
-    return handler();
-  } catch (e) {
-    errorObj.e = e;
-    return errorObj;
-  }
-}
-
-function call1(handler, value) {
-  try {
-    return handler(value);
-  } catch (e) {
-    errorObj.e = e;
-    return errorObj;
-  }
-}
-
-function call3(handler, arg1, arg2, arg3) {
-  try {
-    return handler(arg1, arg2, arg3);
-  } catch (e) {
-    errorObj.e = e;
-    return errorObj;
-  }
-}
-
-function apply(handler, array) {
-  try {
-    switch (array.length) {
-      case 0:
-        return handler();
-      case 1:
-        return handler(array[0]);
-      case 2:
-        return handler(array[0], array[1]);
-      case 3:
-        return handler(array[0], array[1], array[2]);
-      default:
-        return handler.apply(null, array);
-    }
-  } catch (e) {
-    errorObj.e = e;
-    return errorObj;
-  }
-}
-
-function callResolve(receiver, onFulfilled, value) {
-  typeof onFulfilled === 'function'
-    ? callReceiver(receiver, call1(onFulfilled, value))
-    : receiver._resolve(value);
-}
-
-function callReject(receiver, onRejected, reason) {
-  typeof onRejected === 'function'
-    ? callReceiver(receiver, call1(onRejected, reason))
-    : receiver._reject(reason);
-}
-
-function callReceiver(receiver, promise) {
-  if (promise === errorObj) {
-    receiver._reject(errorObj.e);
-    return;
-  }
-  if (!promise || !promise.then) {
-    receiver._resolve(promise);
-    return;
-  }
-  if (promise instanceof AigleCore) {
-    switch (promise._resolved) {
-      case 0:
-        promise._addReceiver(receiver, INTERNAL);
-        return;
-      case 1:
-        receiver._resolve(promise._value);
-        return;
-      case 2:
-        promise.suppressUnhandledRejections();
-        receiver._reject(promise._value);
-        return;
-    }
-  }
-  callThen(promise, receiver);
-}
-
-function callThen(promise, receiver) {
-  promise.then(resolve, reject);
-
-  function resolve(value) {
-    receiver._resolve(value);
-  }
-
-  function reject(reason) {
-    receiver._reject(reason);
-  }
-}
-
-function callProxyThen(promise, receiver, key) {
-  promise.then(resolve, reject);
-
-  function resolve(value) {
-    receiver._callResolve(value, key);
-  }
-
-  function reject(reason) {
-    receiver._callReject(reason, key);
-  }
-}
-
-function callProxyReciever(promise, receiver, key) {
-  if (promise instanceof AigleCore) {
-    switch (promise._resolved) {
-      case 0:
-        promise._addReceiver(receiver, key);
-        return true;
-      case 1:
-        receiver._callResolve(promise._value, key);
-        return true;
-      case 2:
-        promise.suppressUnhandledRejections();
-        return receiver._callReject(promise._value, key) === true;
-    }
-  }
-  if (promise === errorObj) {
-    return receiver._callReject(errorObj.e, key) === true;
-  }
-  if (promise && promise.then) {
-    callProxyThen(promise, receiver, key);
-  } else {
-    receiver._callResolve(promise, key);
-  }
-  return true;
-}
-
-function callProxyRecieverWithFunc(promise, receiver, index) {
-  if (typeof promise === 'function') {
-    promise = promise();
-  }
-  return callProxyReciever(promise, receiver, index);
-}
-
-function createArrayIterator(handler) {
-  return (receiver, coll, index) => handler(coll[index], receiver, index);
-}
-
-function createArrayEach(iterator) {
-  return (receiver, times, coll) => {
-    let i = -1;
-    while (++i < times && iterator(receiver, coll, i)) {}
-  };
-}
-
-function createObjectIterator(handler) {
-  return (receiver, coll, index, result, keys) => {
-    const key = keys[index];
-    result[key] = undefined;
-    return handler(coll[key], receiver, key);
-  };
-}
-
-function createObjectEach(iterator) {
-  return (receiver, times, coll, result, keys) => {
-    let i = -1;
-    while (++i < times && iterator(receiver, coll, i, result, keys)) {}
-  };
-}
-
-function createSetIterator(handler) {
-  return (receiver, iter, index) => {
-    const item = iter.next();
-    return item.done === false && handler(item.value, receiver, index);
-  };
-}
-
-function createSetEach(iterator) {
-  return (receiver, times, coll) => {
-    const iter = coll[iteratorSymbol]();
-    let i = -1;
-    while (++i < times && iterator(receiver, iter, i)) {}
-  };
-}
-
-function createMapIterator(handler) {
-  return (receiver, iter, index, result) => {
-    const item = iter.next();
-    if (item.done) {
-      return false;
-    }
-    const [key, promise] = item.value;
-    result.set(key, undefined);
-    return handler(promise, receiver, key);
-  };
-}
-
-function createMapEach(iterator) {
-  return (receiver, times, coll, result) => {
-    const iter = coll[iteratorSymbol]();
-    let i = -1;
-    while (++i < times && iterator(receiver, iter, i, result)) {}
-  };
-}
-
-function compactArray(array) {
-  let i = -1;
-  const l = array.length;
-  const result = [];
-  while (++i < l) {
-    const value = array[i];
-    if (value !== INTERNAL) {
-      result.push(value);
-    }
-  }
-  return result;
-}
-
-function concatArray(array) {
-  let i = -1;
-  const l = array.length;
-  const result = [];
-  while (++i < l) {
-    const value = array[i];
-    if (Array.isArray(value)) {
-      result.push(...value);
-    } else if (value !== undefined) {
-      result.push(value);
-    }
-  }
-  return result;
-}
-
-function clone(target) {
-  return Array.isArray(target) ? cloneArray(target) : cloneObject(target);
-}
-
-function cloneArray(array) {
-  let l = array.length;
-  const result = Array(l);
-  while (l--) {
-    result[l] = array[l];
-  }
-  return result;
-}
-
-function cloneObject(object) {
-  const keys = Object.keys(object);
-  let l = keys.length;
-  const result = {};
-  while (l--) {
-    const key = keys[l];
-    result[key] = object[key];
-  }
-  return result;
-}
-
-function createEmptyObject(object, keys) {
-  let i = -1;
-  const l = keys.length;
-  const result = {};
-  while (++i < l) {
-    result[keys[i]] = undefined;
-  }
-  return result;
-}
-
-/**
- * @private
- * @param {Array} array
- * @param {number[]} criteria
- */
-function sortArray(array, criteria) {
-  const l = array.length;
-  const indices = Array(l);
-  for (let i = 0; i < l; i++) {
-    indices[i] = i;
-  }
-  quickSort(criteria, 0, l - 1, indices);
-  const result = Array(l);
-  for (let n = 0; n < l; n++) {
-    const i = indices[n];
-    result[n] = i === undefined ? array[n] : array[i];
-  }
-  return result;
-}
-
-/**
- * @private
- * @param {Object} object
- * @param {string[]} keys
- * @param {number[]} criteria
- */
-function sortObject(object, keys, criteria) {
-  const l = keys.length;
-  const indices = Array(l);
-  for (let i = 0; i < l; i++) {
-    indices[i] = i;
-  }
-  quickSort(criteria, 0, l - 1, indices);
-  const result = Array(l);
-  for (let n = 0; n < l; n++) {
-    const i = indices[n];
-    result[n] = object[keys[i === undefined ? n : i]];
-  }
-  return result;
-}
-
-function partition(array, i, j, mid, indices) {
-  let l = i;
-  let r = j;
-  while (l <= r) {
-    i = l;
-    while (l < r && array[l] < mid) {
-      l++;
-    }
-    while (r >= i && array[r] >= mid) {
-      r--;
-    }
-    if (l > r) {
-      break;
-    }
-    swap(array, indices, l++, r--);
-  }
-  return l;
-}
-
-function swap(array, indices, l, r) {
-  const n = array[l];
-  array[l] = array[r];
-  array[r] = n;
-  const i = indices[l];
-  indices[l] = indices[r];
-  indices[r] = i;
-}
-
-function quickSort(array, i, j, indices) {
-  if (i === j) {
-    return;
-  }
-  let k = i;
-  while (++k <= j && array[i] === array[k]) {
-    const l = k - 1;
-    if (indices[l] > indices[k]) {
-      const i = indices[l];
-      indices[l] = indices[k];
-      indices[k] = i;
-    }
-  }
-  if (k > j) {
-    return;
-  }
-  const p = array[i] > array[k] ? i : k;
-  k = partition(array, i, j, array[p], indices);
-  quickSort(array, i, k - 1, indices);
-  quickSort(array, k, j, indices);
-}
-
-function printWarning(message) {
-  isNode
-    ? console.warn(`\u001b[31m${message}\u001b[0m\n`)
-    : console.warn(`%c${message}`, 'color: red');
-}
-
-
-/***/ }),
-
-/***/ 3285:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, call1, apply, callProxyReciever } = __nccwpck_require__(1783);
-
-class Join extends AigleProxy {
-  constructor(handler, size) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._rest = size;
-    this._result = Array(size);
-    this._handler = handler;
-  }
-
-  _callResolve(value, index) {
-    if (index === INTERNAL) {
-      return this._promise._resolve(value);
-    }
-    this._result[index] = value;
-    if (--this._rest !== 0) {
-      return;
-    }
-    const { _handler, _result } = this;
-    if (_handler === undefined) {
-      this._promise._resolve(_result);
-    } else {
-      callProxyReciever(apply(_handler, _result), this, INTERNAL);
-    }
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-class Spread extends AigleProxy {
-  constructor(handler) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._handler = handler;
-  }
-
-  _callResolve(value, index) {
-    if (index === INTERNAL) {
-      return this._promise._resolve(value);
-    }
-    spread(this, value);
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { join, Spread };
-
-/**
- * @example
- * const p1 = Aigle.delay(20).then(() => 1);
- * const p2 = Aigle.delay(10).then(() => 2);
- * Aigle.join(p1, p2, (v1, v2) => {
- *   console.log(v1, v2); // 1 2
- * });
- */
-function join() {
-  let l = arguments.length;
-  const handler = typeof arguments[l - 1] === 'function' ? arguments[--l] : undefined;
-  const receiver = new Join(handler, l);
-  while (l--) {
-    callProxyReciever(arguments[l], receiver, l);
-  }
-  return receiver._promise;
-}
-
-/**
- * @private
- * @param {AigleProxy} proxy
- * @param {string|Array|Object} array
- */
-function spread(proxy, array) {
-  const { _handler } = proxy;
-  if (_handler === undefined) {
-    return proxy._promise._resolve(array);
-  }
-  switch (typeof array) {
-    case 'string':
-      array = array.split('');
-      break;
-    case 'object':
-      if (Array.isArray(array)) {
-        break;
-      }
-      if (array) {
-        const keys = Object.keys(array);
-        let l = keys.length;
-        const arr = Array(l);
-        while (l--) {
-          arr[l] = array[keys[l]];
-        }
-        array = arr;
-        break;
-      }
-    /* eslint no-fallthrough: 0 */
-    default:
-      /* eslint no-fallthrough: 1 */
-      return callProxyReciever(call1(_handler, array), proxy, INTERNAL);
-  }
-  callProxyReciever(apply(_handler, array), proxy, INTERNAL);
-}
-
-
-/***/ }),
-
-/***/ 352:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-
-class Map extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-
-  _callResolve(value, index) {
-    this._result[index] = value;
-    if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    }
-  }
-}
-
-module.exports = { map, Map };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  this._result = Array(this._rest);
-  return this;
-}
-
-/**
- * `Aigle.map` has almost the same functionality as `Array#map`.
- * It iterates all elements of `collection` and executes `iterator` using each element on parallel.
- * The `iterator` needs to return a promise or something.
- * Then the result will be assigned to an array and the array order will be ensured.
- * All of them are finished, the function will return an array as a result.
- * @param {Array|Object} collection
- * @param {Function|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.map(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [2, 8, 4];
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.map(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [2, 8, 4];
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const collection = [{
- *  uid: 1, name: 'test1'
- * }, {
- *  uid: 4, name: 'test4'
- * }, {
- *  uid: 2, name: 'test2'
- * }];
- * Aigle.map(collection, 'uid')
- *   .then(uids => console.log(uids)); // [1, 4, 2]
- */
-function map(collection, iterator) {
-  return new Map(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 3705:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-
-class MapLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-  }
-
-  _callResolve(value, index) {
-    this._result[index] = value;
-    if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else if (this._callRest-- > 0) {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { mapLimit, MapLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._result = Array(this._rest);
-  return this;
-}
-
-/**
- * `Aigle.mapLimit` is almost the smae as [`Aigle.map`](https://suguru03.github.io/aigle/docs/Aigle.html#map) and
- * [`Aigle.mapSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#mapSeries), but it will work with concurrency.
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [2, 10, 6, 8, 4];
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [2, 10, 6, 8, 4];
- *     console.log(order); // [1, 3, 5, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapLimit(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [2, 10, 6, 8, 4];
- *     console.log(order); // [1, 2, 3, 4, 5];
- *   });
- */
-function mapLimit(collection, limit, iterator) {
-  return new MapLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 4738:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-
-class MapSeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-
-  _callResolve(value, index) {
-    this._result[index] = value;
-    if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { mapSeries, MapSeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._result = Array(this._rest);
-  return this;
-}
-
-/**
- * `Aigle.mapSeries` is almost the smae as [`Aigle.map`](https://suguru03.github.io/aigle/docs/Aigle.html#map), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapSeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [2, 8, 4];
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapSeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [2, 8, 4];
- *     console.log(order); // [1, 4, 2];
- *   });
- */
-function mapSeries(collection, iterator) {
-  return new MapSeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 1928:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthandWithOrder } = __nccwpck_require__(6198);
-
-class MapValues extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { mapValues, MapValues };
-
-function set(collection) {
-  setShorthandWithOrder.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  this._result[index] = value;
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-function callResolveObject(value, index) {
-  this._result[this._keys[index]] = value;
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-/**
- * `Aigle.mapValues` is similar to [`Aigle.map`](https://suguru03.github.io/aigle/docs/global.html#map).
- * It returns an object instead of an array.
- * @param {Array|Object} collection
- * @param {Function|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapValues(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 2, '1': 8, '2': 4 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapValues(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { a: 2, b: 8, c: 4 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const collection = {
- *   task1: { uid: 1, name: 'test1' },
- *   task2: { uid: 4, name: 'test4' },
- *   task3: { uid: 2, name: 'test2' }
- * }];
- * Aigle.mapValues(collection, 'uid')
- *   .then(uids => console.log(uids)); // { task1: 1, task2: 4, task3: 2 }
- */
-function mapValues(collection, iterator) {
-  return new MapValues(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 8164:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-const { createEmptyObject } = __nccwpck_require__(1783);
-
-class MapValuesLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-  }
-}
-
-module.exports = { mapValuesLimit, MapValuesLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  if (this._keys === undefined) {
-    this._result = {};
-    this._callResolve = callResolveArray;
-  } else {
-    this._result = createEmptyObject(collection, this._keys);
-    this._callResolve = callResolveObject;
-  }
-  return this;
-}
-
-function callResolveArray(value, index) {
-  this._result[index] = value;
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  this._result[this._keys[index]] = value;
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.mapValuesLimit` is almost the same as [`Aigle.mapValues`](https://suguru03.github.io/aigle/docs/Aigle.html#mapValues) and
- * [`Aigle.mapValuesSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#mapValuesSeries), but it will work with concurrency.
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapValuesLimit(collection, 2, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 2, '1': 10, '2': 6, '3': 8, '4': 4 }
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapValuesLimit(collection, 2, iterator)
- *   .then(object => {
- *     console.log(object); // { a: 2, b: 10, c: 6, d: 8, e: 4 }
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapValuesLimit(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 2, '1': 10, '2': 6, '3': 8, '4': 4 }
- *     console.log(order); // [1, 2, 3, 4, 5]
- *   });
- */
-function mapValuesLimit(collection, limit, iterator) {
-  return new MapValuesLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 2380:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-
-class MapValuesSeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { mapValuesSeries, MapValuesSeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  this._result[index] = value;
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  this._result[this._keys[index]] = value;
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.mapValuesSeries` is almost the same as [`Aigle.mapValues`](https://suguru03.github.io/aigle/docs/Aigle.html#mapValues), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapValuesSeries(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 2, '1': 8, '2': 4 };
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.mapValuesSeries(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { a: 2, b: 8, c: 4 }
- *     console.log(order); // [1, 4, 2];
- *   });
- */
-function mapValuesSeries(collection, iterator) {
-  return new MapValuesSeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 6259:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setOmitShorthand } = __nccwpck_require__(6198);
-
-class Omit extends Each {
-  constructor(collection, iterator, args) {
-    if (typeof iterator !== 'function') {
-      iterator = [iterator, ...args];
-    }
-    super(collection, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { omit, Omit };
-
-function set(collection) {
-  setOmitShorthand.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (!value) {
-    this._result[index] = this._coll[index];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-function callResolveObject(value, index) {
-  if (!value) {
-    const key = this._keys[index];
-    this._result[key] = this._coll[key];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-/**
- * `Aigle.omit` has almost the same functionality as [`Aigle.filter`](https://suguru03.github.io/aigle/docs/global.html#filter).
- * It will return an object as a result.
- * @param {Array|Object} collection
- * @param {Function|Array|Object|string} iterator
- * @param {*} [args]
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.omit(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 1 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.omit(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { a: 1 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- */
-function omit(collection, iterator, ...args) {
-  return new Omit(collection, iterator, args)._execute();
-}
-
-
-/***/ }),
-
-/***/ 9194:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-
-class OmitBy extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { omitBy, OmitBy };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (!value) {
-    this._result[index] = this._coll[index];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-function callResolveObject(value, index) {
-  if (!value) {
-    const key = this._keys[index];
-    this._result[key] = this._coll[key];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-/**
- * `Aigle.omitBy` has almost the same functionality as [`Aigle.reject`](https://suguru03.github.io/aigle/docs/global.html#reject).
- * It will return an object as a result.
- * @param {Array|Object} collection
- * @param {Function|Array|Object|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.omitBy(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '1': 4, '2': 4 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.omitBy(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { b: 4, c: 2 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.omitBy(collection, 'active')
- *   .then(object => {
- *     console.log(object); // { '0': { name: 'bargey', active: false } }
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.omitBy(collection, ['name', 'fread'])
- *   .then(object => {
- *     console.log(object); // { '0': { name: 'bargey', active: false } }
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.omitBy(collection, { name: 'fread', active: true })
- *   .then(object => {
- *     console.log(object); // { '0': { name: 'bargey', active: false } }
- *   });
- */
-function omitBy(collection, iterator) {
-  return new OmitBy(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 3195:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-
-class OmitByLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { omitByLimit, OmitByLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (!value) {
-    this._result[index] = this._coll[index];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (!value) {
-    const key = this._keys[index];
-    this._result[key] = this._coll[key];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.omitByLimit` is almost the as [`Aigle.omitBy`](https://suguru03.github.io/aigle/docs/Aigle.html#omitBy) and
- * [`Aigle.omitBySeries`](https://suguru03.github.io/aigle/docs/Aigle.html#omitBySeries), but it will work with concurrency.
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.omitByLimit(collection, 2, iterator)
- *   .then(object => {
- *     console.log(object); // { '3': 4, '4': 2 }
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.omitByLimit(collection, 2, iterator)
- *   .then(object => {
- *     console.log(object); // { d: 4, e: 2 }
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.omitByLimit(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '3': 4, '4': 2 }
- *     console.log(order); // [1, 2, 3, 4, 5]
- *   });
- */
-function omitByLimit(collection, limit, iterator) {
-  return new OmitByLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 3752:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { PENDING } = __nccwpck_require__(1783);
-const { setSeries } = __nccwpck_require__(6198);
-
-class OmitBySeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator);
-    this._result = {};
-    if (collection === PENDING) {
-      this._set = set;
-    } else {
-      this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-    }
-  }
-}
-
-module.exports = { omitBySeries, OmitBySeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (!value) {
-    this._result[index] = this._coll[index];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (!value) {
-    const key = this._keys[index];
-    this._result[key] = this._coll[key];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.omitBySeries` is almost the as [`Aigle.omitBy`](https://suguru03.github.io/aigle/docs/Aigle.html#omitBy), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.omitBySeriesSeries(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '1': 4, '2': 2 }
- *     console.log(order); // [1, 4, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.omitBySeriesSeries(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { b: 4, c: 2 }
- *     console.log(order); // [1, 4, 2]
- *   });
- */
-function omitBySeries(collection, iterator) {
-  return new OmitBySeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 8176:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const {
-  INTERNAL,
-  PENDING,
-  promiseArrayEachWithFunc,
-  promiseObjectEachWithFunc,
-  promiseMapEachWithFunc,
-  promiseSetEachWithFunc,
-  iteratorSymbol
-} = __nccwpck_require__(1783);
-const { callResolve, callResolveMap } = __nccwpck_require__(466);
-
-class Parallel extends AigleProxy {
-  constructor(coll) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._rest = undefined;
-    this._result = undefined;
-    if (coll === PENDING) {
-      this._callResolve = this._set;
-    } else {
-      this._callResolve = undefined;
-      this._set(coll);
-    }
-  }
-
-  _set(coll) {
-    if (Array.isArray(coll)) {
-      const size = coll.length;
-      this._rest = size;
-      this._result = Array(size);
-      this._callResolve = callResolve;
-      promiseArrayEachWithFunc(this, size, coll);
-    } else if (!coll || typeof coll !== 'object') {
-      this._rest = 0;
-      this._result = {};
-    } else if (coll[iteratorSymbol]) {
-      const size = coll.size;
-      this._rest = size;
-      if (coll instanceof Map) {
-        const result = new Map();
-        this._result = result;
-        this._callResolve = callResolveMap;
-        promiseMapEachWithFunc(this, Infinity, coll, result);
-      } else {
-        this._result = Array(this._rest);
-        this._callResolve = callResolve;
-        promiseSetEachWithFunc(this, Infinity, coll);
-      }
-    } else {
-      const result = {};
-      const keys = Object.keys(coll);
-      const size = keys.length;
-      this._rest = size;
-      this._result = result;
-      this._callResolve = callResolve;
-      promiseObjectEachWithFunc(this, size, coll, result, keys);
-    }
-    if (this._rest === 0) {
-      this._promise._resolve(this._result);
-    }
-    return this;
-  }
-
-  _execute() {
-    return this._promise;
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { parallel, Parallel };
-
-/**
- * `Aigle.parallel` functionality is similar to [`Aigle.all`](https://suguru03.github.io/aigle/docs/global.html#all)
- * and [`Aigle.props`](https://suguru03.github.io/aigle/docs/global.html#props), and the function allows function collection.
- * @param {Array|Object} collection - it should be an array/object of functions or Promise instances
- * @example
- *   Aigle.parallel([
- *     () => Aigle.delay(30, 1),
- *     Aigle.delay(20, 2),
- *     3
- *   ]).then(array => {
- *     console.log(array); // [1, 2, 3]
- *   });
- *
- * @example
- *   Aigle.parallel({
- *     a: () => Aigle.delay(30, 1),
- *     b: Aigle.delay(20, 2),
- *     c: 3
- *   }).then(obj => {
- *     console.log(obj); // { a: 1, b: 2, c: 3 }
- *   });
- */
-function parallel(collection) {
-  return new Parallel(collection)._promise;
-}
-
-
-/***/ }),
-
-/***/ 9587:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Series } = __nccwpck_require__(9429);
-const { DEFAULT_LIMIT } = __nccwpck_require__(1783);
-
-class ParallelLimit extends Series {
-  constructor(coll, limit = DEFAULT_LIMIT) {
-    super(coll);
-    this._size = this._rest;
-    this._limit = limit;
-  }
-
-  _execute() {
-    const { _limit, _rest } = this;
-    if (_rest === 0) {
-      this._promise._resolve(this._result);
-      return this._promise;
-    }
-    this._size = _rest;
-    this._iterate = iterate;
-    let limit = _limit < _rest ? _limit : _rest;
-    while (limit--) {
-      this._iterate();
-    }
-    return this._promise;
-  }
-
-  _callResolve(value, key) {
-    this._result[key] = value;
-    if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      this._iterate();
-    }
-  }
-
-  _callResolveMap(value, key) {
-    this._result.set(key, value);
-    if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      this._iterate();
-    }
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { parallelLimit, ParallelLimit };
-
-function iterate() {
-  ++this._index < this._size &&
-    this._iterator(this, this._coll, this._index, this._result, this._keys);
-}
-
-/**
- * `Aigle.parallel` functionality has the same functionality as [`Aigle.parallel`](https://suguru03.github.io/aigle/docs/global.html#parallel)
- * and it works with concurrency.
- * @param {Array|Object} collection - it should be an array/object of functions or Promise instances
- * @param {integer} [limit=8] - It is concurrncy, default is 8
- * @example
- *   Aigle.parallelLimit([
- *     () => Aigle.delay(30, 1),
- *     Aigle.delay(20, 2),
- *     3
- *   ]).then(array => {
- *     console.log(array); // [1, 2, 3]
- *   });
- *
- * @example
- *   Aigle.parallelLimit({
- *     a: () => Aigle.delay(30, 1),
- *     b: Aigle.delay(20, 2),
- *     c: 3
- *   }, 2).then(obj => {
- *     console.log(obj); // { a: 1, b: 2, c: 3 }
- *   });
- */
-function parallelLimit(collection, limit) {
-  return new ParallelLimit(collection, limit)._execute();
-}
-
-
-/***/ }),
-
-/***/ 6245:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setPickShorthand } = __nccwpck_require__(6198);
-
-class Pick extends Each {
-  constructor(collection, iterator, args) {
-    if (typeof iterator !== 'function') {
-      iterator = [iterator, ...args];
-    }
-    super(collection, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { pick, Pick };
-
-function set(collection) {
-  setPickShorthand.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._result[index] = this._coll[index];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    const key = this._keys[index];
-    this._result[key] = this._coll[key];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-/**
- * `Aigle.pick` has almost the same functionality as [`Aigle.filter`](https://suguru03.github.io/aigle/docs/global.html#filter).
- * It will return an object as a result.
- * @param {Array|Object} collection
- * @param {Function|Array|Object|string} iterator
- * @param {*} [args]
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.pick(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 1 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.pick(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { a: 1 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- */
-function pick(collection, iterator, ...args) {
-  return new Pick(collection, iterator, args)._execute();
-}
-
-
-/***/ }),
-
-/***/ 8254:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-
-class PickBy extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { pickBy, PickBy };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._result[index] = this._coll[index];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    const key = this._keys[index];
-    this._result[key] = this._coll[key];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-/**
- * `Aigle.pickBy` has almost the same functionality as [`Aigle.filter`](https://suguru03.github.io/aigle/docs/global.html#filter).
- * It will return an object as a result.
- * @param {Array|Object} collection
- * @param {Function|Array|Object|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.pickBy(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 1 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.pickBy(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { a: 1 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.pickBy(collection, 'active')
- *   .then(object => {
- *     console.log(object); // { '1': { name: 'fread', active: true } }
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.pickBy(collection, ['name', 'fread'])
- *   .then(object => {
- *     console.log(object); // { '1': { name: 'fread', active: true } }
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.pickBy(collection, { name: 'fread', active: true })
- *   .then(object => {
- *     console.log(object); // { '1': { name: 'fread', active: true } }
- *   });
- */
-function pickBy(collection, iterator) {
-  return new PickBy(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 8134:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-
-class PickByLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { pickByLimit, PickByLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._result[index] = this._coll[index];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    const key = this._keys[index];
-    this._result[key] = this._coll[key];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.pickByLimit` is almost the as [`Aigle.pickBy`](https://suguru03.github.io/aigle/docs/Aigle.html#pickBy) and
- * [`Aigle.pickBySeries`](https://suguru03.github.io/aigle/docs/Aigle.html#pickBySeries), but it will work with concurrency.
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.pickByLimit(collection, 2, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 1, '1': 5, '2': 3 }
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.pickByLimit(collection, 2, iterator)
- *   .then(object => {
- *     console.log(object); // { a: 1, b: 5, c: 3 }
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.pickByLimit(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 1, '1': 5, '2': 3 }
- *     console.log(order); // [1, 2, 3, 4, 5]
- *   });
- */
-function pickByLimit(collection, limit, iterator) {
-  return new PickByLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 9863:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-
-class PickBySeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-    this._result = {};
-  }
-}
-
-module.exports = { pickBySeries, PickBySeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  if (value) {
-    this._result[index] = this._coll[index];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  if (value) {
-    const key = this._keys[index];
-    this._result[key] = this._coll[key];
-  }
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.pickBySeries` is almost the as [`Aigle.pickBy`](https://suguru03.github.io/aigle/docs/Aigle.html#pickBy), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.pickBySeries(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { '0': 1 }
- *     console.log(order); // [1, 4, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num * 2;
- *     });
- * };
- * Aigle.pickBySeries(collection, iterator)
- *   .then(object => {
- *     console.log(object); // { a: 1 }
- *     console.log(order); // [1, 4, 2]
- *   });
- */
-function pickBySeries(collection, iterator) {
-  return new PickBySeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 215:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, callThen } = __nccwpck_require__(1783);
-
-const globalSetImmediate = typeof setImmediate === 'function' ? setImmediate : {};
-const custom =
-  (() => {
-    try {
-      return __nccwpck_require__(1669).promisify.custom;
-    } catch (e) {
-      return;
-    }
-  })() || {};
-
-module.exports = promisify;
-
-/**
- * @param {Object|Function} fn
- * @param {string|number|Object} [fn]
- * @param {Object} [fn.context]
- * @example
- * const func = (a, b, c, callback) => callback(null, a + b + c);
- * Aigle.promisify(func)(1, 2, 3)
- *   .then(value => console.log(value)); // 6
- *
- * @example
- * const obj = {
- *   val: 1,
- *   get(callback) {
- *     callback(null, this.val);
- *   }
- * };
- *
- * // using bind
- * Aigle.promisify(obj.get.bind(obj))().then(console.log);
- *
- * // using context
- * Aigle.promisify(obj.get, { context: obj })().then(console.log);
- *
- * // using shorthand
- * Aigle.promisify(obj, 'get')().then(console.log);
- */
-function promisify(fn, opts) {
-  switch (typeof fn) {
-    case 'object':
-      switch (typeof opts) {
-        case 'string':
-        case 'number':
-          if (typeof fn[opts] !== 'function') {
-            throw new TypeError('Function not found key: ' + opts);
-          }
-          if (fn[opts].__isPromisified__) {
-            return fn[opts];
-          }
-          return makeFunctionByKey(fn, opts);
-        default:
-          throw new TypeError('Second argument is invalid');
-      }
-    case 'function':
-      if (fn.__isPromisified__) {
-        return fn;
-      }
-      const ctx = opts && opts.context !== undefined ? opts.context : undefined;
-      return makeFunction(fn, ctx);
-    default:
-      throw new TypeError('Type of first argument is not function');
-  }
-}
-
-/**
- * @private
- * @param {Aigle} promise
- */
-function makeCallback(promise) {
-  return (err, res) => (err ? promise._reject(err) : promise._resolve(res));
-}
-
-/**
- * @private
- * @param {Object} obj
- * @param {string} key
- */
-function makeFunctionByKey(obj, key) {
-  promisified.__isPromisified__ = true;
-  return promisified;
-
-  function promisified(arg) {
-    const promise = new Aigle(INTERNAL);
-    const callback = makeCallback(promise);
-    let l = arguments.length;
-    switch (l) {
-      case 0:
-        obj[key](callback);
-        break;
-      case 1:
-        obj[key](arg, callback);
-        break;
-      default:
-        const args = Array(l);
-        while (l--) {
-          args[l] = arguments[l];
-        }
-        args[args.length] = callback;
-        obj[key].apply(obj, args);
-        break;
-    }
-    return promise;
-  }
-}
-
-/**
- * @private
- * @param {function} fn
- * @param {*} [ctx]
- */
-function makeFunction(fn, ctx) {
-  const func = fn[custom];
-  if (func) {
-    nativePromisified.__isPromisified__ = true;
-    return nativePromisified;
-  }
-  switch (fn) {
-    case setTimeout:
-      return Aigle.delay;
-    case globalSetImmediate:
-      return Aigle.resolve;
-  }
-  promisified.__isPromisified__ = true;
-  return promisified;
-
-  function nativePromisified(arg) {
-    const promise = new Aigle(INTERNAL);
-    let l = arguments.length;
-    let p;
-    switch (l) {
-      case 0:
-        p = func.call(ctx || this);
-        break;
-      case 1:
-        p = func.call(ctx || this, arg);
-        break;
-      default:
-        const args = Array(l);
-        while (l--) {
-          args[l] = arguments[l];
-        }
-        p = func.apply(ctx || this, args);
-        break;
-    }
-    callThen(p, promise);
-    return promise;
-  }
-
-  function promisified(arg) {
-    const promise = new Aigle(INTERNAL);
-    const callback = makeCallback(promise);
-    let l = arguments.length;
-    switch (l) {
-      case 0:
-        fn.call(ctx || this, callback);
-        break;
-      case 1:
-        fn.call(ctx || this, arg, callback);
-        break;
-      default:
-        const args = Array(l);
-        while (l--) {
-          args[l] = arguments[l];
-        }
-        args[args.length] = callback;
-        fn.apply(ctx || this, args);
-        break;
-    }
-    return promise;
-  }
-}
-
-
-/***/ }),
-
-/***/ 4397:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const promisify = __nccwpck_require__(215);
-const skipMap = {
-  constructor: true,
-  arity: true,
-  length: true,
-  name: true,
-  arguments: true,
-  caller: true,
-  callee: true,
-  prototype: true,
-  __isPromisified__: true
-};
-
-module.exports = promisifyAll;
-
-/**
- * @param {Object} target
- * @param {Object} [opts]
- * @param {String} [opts.suffix=Async]
- * @param {Function} [opts.filter]
- * @param {Integer} [opts.depth=2]
- * @example
- * const redis = require('redis');
- * Aigle.promisifyAll(redis);
- * const client = redis.createClient();
- *
- * const key = 'test';
- * redis.hsetAsync(key, 1)
- *   .then(() => redis.hgetAsync(key))
- *   .then(value => console.log(value)); // 1
- */
-function promisifyAll(target, opts) {
-  const { suffix = 'Async', filter = defaultFilter, depth = 2 } = opts || {};
-  _promisifyAll(suffix, filter, target, undefined, undefined, depth);
-  return target;
-}
-
-function defaultFilter(name) {
-  return /^(?!_).*/.test(name);
-}
-
-function _promisifyAll(suffix, filter, obj, key, target, depth) {
-  const memo = {};
-  switch (typeof obj) {
-    case 'function':
-      if (target) {
-        if (obj.__isPromisified__) {
-          return;
-        }
-        const _key = `${key}${suffix}`;
-        if (target[_key]) {
-          if (!target[_key].__isPromisified__) {
-            throw new TypeError(
-              `Cannot promisify an API that has normal methods with '${suffix}'-suffix`
-            );
-          }
-        } else {
-          target[_key] = promisify(obj);
-        }
-      }
-      iterate(suffix, filter, obj, obj, depth, memo);
-      iterate(suffix, filter, obj.prototype, obj.prototype, depth, memo);
-      break;
-    case 'object':
-      if (!obj) {
-        break;
-      }
-      iterate(suffix, filter, obj, obj, depth, memo);
-      iterate(suffix, filter, Object.getPrototypeOf(obj), obj, depth, memo);
-  }
-}
-
-const fp = Function.prototype;
-const op = Object.prototype;
-const ap = Array.prototype;
-
-function iterate(suffix, filter, obj, target, depth, memo) {
-  if (depth-- === 0 || !obj || fp === obj || op === obj || ap === obj || Object.isFrozen(obj)) {
-    return;
-  }
-  const keys = Object.getOwnPropertyNames(obj);
-  let l = keys.length;
-  while (l--) {
-    const key = keys[l];
-    if (skipMap[key] === true || memo[key] === true || !filter(key)) {
-      continue;
-    }
-    const desc = Object.getOwnPropertyDescriptor(obj, key);
-    if (!desc || desc.set || desc.get) {
-      continue;
-    }
-    memo[key] = true;
-    _promisifyAll(suffix, filter, obj[key], key, target, depth);
-  }
-}
-
-
-/***/ }),
-
-/***/ 466:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, PENDING, promiseObjectEach, promiseMapEach } = __nccwpck_require__(1783);
-
-class Props extends AigleProxy {
-  constructor(coll) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._rest = 0;
-    this._result = undefined;
-    if (coll === PENDING) {
-      this._callResolve = this._set;
-    } else {
-      this._callResolve = undefined;
-      this._set(coll);
-    }
-  }
-
-  _set(coll) {
-    if (typeof coll !== 'object' || coll === null) {
-      this._result = {};
-    } else if (coll instanceof Map) {
-      const result = new Map();
-      this._result = result;
-      this._rest = coll.size;
-      this._callResolve = callResolveMap;
-      promiseMapEach(this, Infinity, coll, result);
-    } else {
-      const keys = Object.keys(coll);
-      const size = keys.length;
-      const result = {};
-      this._result = result;
-      this._rest = size;
-      this._callResolve = callResolve;
-      promiseObjectEach(this, size, coll, result, keys);
-    }
-    if (this._rest === 0) {
-      this._promise._resolve(this._result);
-    }
-    return this;
-  }
-
-  _execute() {
-    return this._promise;
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { props, Props, callResolve, callResolveMap };
-
-function callResolve(value, key) {
-  this._result[key] = value;
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-function callResolveMap(value, key) {
-  this._result.set(key, value);
-  if (--this._rest === 0) {
-    this._promise._resolve(this._result);
-  }
-}
-
-/**
- * `Aigle.props` is almost the same functionality as [`Aigle.all`](https://suguru03.github.io/aigle/docs/global.html#all)
- * But the function allows an object as the first argument instead of an array.
- * @param {Object} object
- * @example
- * const order = [];
- * const makeDelay = (num, delay) => {
- *   return Aigle.delay(delay)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.props({
- *   a: makeDelay(1, 30),
- *   b: makeDelay(2, 20),
- *   c: makeDelay(3, 10)
- * })
- * .then(object => {
- *   console.log(object); // { a: 1, b: 2, c: 3 }
- *   console.log(order); // [3, 2, 1]
- * });
- */
-function props(object) {
-  return new Props(object)._promise;
-}
-
-
-/***/ }),
-
-/***/ 2901:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const {
-  INTERNAL,
-  PENDING,
-  promiseArrayEach,
-  promiseObjectEach,
-  promiseMapEach,
-  promiseSetEach,
-  iteratorSymbol
-} = __nccwpck_require__(1783);
-
-class Race extends AigleProxy {
-  constructor(coll) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._keys = undefined;
-    if (coll === PENDING) {
-      this._callResolve = this._set;
-    } else {
-      this._callResolve = undefined;
-      this._set(coll);
-    }
-  }
-
-  _set(coll) {
-    this._callResolve = callResolve;
-    if (Array.isArray(coll)) {
-      promiseArrayEach(this, coll.length, coll);
-    } else if (!coll || typeof coll !== 'object') {
-    } else if (coll[iteratorSymbol]) {
-      coll instanceof Map
-        ? promiseMapEach(this, Infinity, coll, new Map())
-        : promiseSetEach(this, Infinity, coll);
-    } else {
-      const keys = Object.keys(coll);
-      promiseObjectEach(this, keys.length, coll, {}, keys);
-    }
-    return this;
-  }
-
-  _execute() {
-    return this._promise;
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { race, Race };
-
-function callResolve(value) {
-  this._promise._resolve(value);
-}
-
-/**
- * @param {Object|Array} collection
- * @example
- * Aigle.race([
- *   new Aigle(resolve => setTimeout(() => resolve(1), 30)),
- *   new Aigle(resolve => setTimeout(() => resolve(2), 20)),
- *   new Aigle(resolve => setTimeout(() => resolve(3), 10))
- * ])
- * .then(value => console.log(value)); // 3
- *
- * @example
- * Aigle.race({
- *   a: new Aigle(resolve => setTimeout(() => resolve(1), 30)),
- *   b: new Aigle(resolve => setTimeout(() => resolve(2), 20)),
- *   c: new Aigle(resolve => setTimeout(() => resolve(3), 10))
- * })
- * .then(value => console.log(value)); // 3
- */
-function race(collection) {
-  return new Race(collection)._promise;
-}
-
-
-/***/ }),
-
-/***/ 1902:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { execute, setSeries } = __nccwpck_require__(6198);
-const { INTERNAL, PENDING, call3, callProxyReciever } = __nccwpck_require__(1783);
-
-class Reduce extends AigleProxy {
-  constructor(collection, iterator, result) {
-    super();
-    this._result = result;
-    this._iterator = iterator;
-    this._promise = new Aigle(INTERNAL);
-    this._coll = undefined;
-    this._rest = undefined;
-    this._size = undefined;
-    this._keys = undefined;
-    this._iterate = undefined;
-    if (collection === PENDING) {
-      this._set = set;
-      this._iterate = this._callResolve;
-      this._callResolve = execute;
-    } else {
-      set.call(this, collection);
-    }
-  }
-
-  _callResolve(result, index) {
-    if (--this._rest === 0) {
-      this._promise._resolve(result);
-    } else {
-      this._iterate(++index, result);
-    }
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { reduce, Reduce };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  if (this._keys === undefined) {
-    this._iterate = iterateArray;
-    this._execute = executeArray;
-  } else {
-    this._iterate = iterateObject;
-    this._execute = executeObject;
-  }
-  return this;
-}
-
-function iterateArray(index, result) {
-  callProxyReciever(call3(this._iterator, result, this._coll[index], index), this, index);
-}
-
-function iterateObject(index, result) {
-  const key = this._keys[index];
-  callProxyReciever(call3(this._iterator, result, this._coll[key], key), this, index);
-}
-
-function executeArray() {
-  if (this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._result === undefined) {
-    this._callResolve(this._coll[0], 0);
-  } else {
-    this._iterate(0, this._result);
-  }
-  return this._promise;
-}
-
-function executeObject() {
-  if (this._rest === 0) {
-    this._promise._resolve(this._result);
-  } else if (this._result === undefined) {
-    this._callResolve(this._coll[this._keys[0]], 0);
-  } else {
-    this._iterate(0, this._result);
-  }
-  return this._promise;
-}
-
-/**
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @param {*} [result]
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const collection = [1, 4, 2];
- * const iterator = (result, num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => result + num);
- * };
- * return Aigle.reduce(collection, iterator, 1)
- *   .then(value => console.log(value)); // 8
- *
- * @example
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (result, num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => result + num);
- * };
- * return Aigle.reduce(collection, iterator, '')
- *   .then(value => console.log(value)); // '142'
- */
-function reduce(collection, iterator, result) {
-  return new Reduce(collection, iterator, result)._execute();
-}
-
-
-/***/ }),
-
-/***/ 7306:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-const { INTERNAL, compactArray } = __nccwpck_require__(1783);
-
-class Reject extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-module.exports = { reject, Reject };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  this._result = Array(this._rest);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  this._result[index] = value ? INTERNAL : this._coll[index];
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  }
-}
-
-function callResolveObject(value, index) {
-  this._result[index] = value ? INTERNAL : this._coll[this._keys[index]];
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  }
-}
-
-/**
- * Aigle reject has two features.
- * One of them is basic [`Promise.reject`](https://developer.mozilla.org/en/docs/Web/JavaScript/Reference/Global_Objects/Promise/reject) function, it returns a rejected Aigle instance.
- * The other is a collection function, it requires an iterator function. It is the opposite of [`filter`](https://suguru03.github.io/aigle/docs/Aigle.html#filter).
- * If the iterator function is not defined, the function works as a first one.
- *
- * @param {Function|Array|Object} collection
- * @param {Function|Array|Object|string} [iterator]
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const error = new Error('error');
- * Aigle.reject(error)
- *   .catch(error => {
- *     console.log(error); // error
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.reject(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [4, 2];
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.reject(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [4, 2];
- *     console.log(order); // [1, 2, 4];
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.reject(collection, 'active')
- *   .then(array => {
- *     console.log(array); // [{ name: 'fread', active: false }]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.reject(collection, ['name', 'bargey'])
- *   .then(array => {
- *     console.log(array); // [{ name: 'fread', active: false }]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   name: 'bargey', active: false
- * }, {
- *   name: 'fread', active: true
- * }];
- * Aigle.reject(collection, { name: 'bargey', active: false })
- *   .then(array => {
- *     console.log(array); // [{ name: 'fread', active: false }]
- *   });
- */
-function reject(collection, iterator) {
-  return new Reject(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 1099:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-const { INTERNAL, compactArray } = __nccwpck_require__(1783);
-
-class RejectLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-  }
-}
-
-module.exports = { rejectLimit, RejectLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._result = Array(this._rest);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  this._result[index] = value ? INTERNAL : this._coll[index];
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  this._result[index] = value ? INTERNAL : this._coll[this._keys[index]];
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-/**
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.rejectLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [4, 2]
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.rejectLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [4, 2]
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.rejectLimit(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [4, 2]
- *     console.log(order); // [1, 2, 3, 4, 5]
- *   });
- */
-function rejectLimit(collection, limit, iterator) {
-  return new RejectLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 8450:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-const { INTERNAL, compactArray } = __nccwpck_require__(1783);
-
-class RejectSeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-module.exports = { rejectSeries, RejectSeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._result = Array(this._rest);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(value, index) {
-  this._result[index] = value ? INTERNAL : this._coll[index];
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  } else {
-    this._iterate();
-  }
-}
-
-function callResolveObject(value, index) {
-  this._result[index] = value ? INTERNAL : this._coll[this._keys[index]];
-  if (--this._rest === 0) {
-    this._promise._resolve(compactArray(this._result));
-  } else {
-    this._iterate();
-  }
-}
-
-/**
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.rejectSeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [4, 2];
- *     console.log(order); // [1, 4, 2];
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2;
- *     });
- * };
- * Aigle.rejectSeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [4, 2];
- *     console.log(order); // [1, 4, 2];
- *   });
- */
-function rejectSeries(collection, iterator) {
-  return new RejectSeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 1016:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, call0, callProxyReciever } = __nccwpck_require__(1783);
-const DEFAULT_RETRY = 5;
-
-class Retry extends AigleProxy {
-  constructor(opts, handler) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._handler = handler;
-    this._count = 0;
-    this._times = DEFAULT_RETRY;
-    this._interval = undefined;
-    switch (opts && typeof opts) {
-      case 'function':
-        this._handler = opts;
-        break;
-      case 'object':
-        const { interval, times } = opts;
-        this._times = times || DEFAULT_RETRY;
-        this._interval =
-          typeof interval === 'function' ? interval : interval ? () => interval : undefined;
-        this._iterate = this._iterate.bind(this);
-        break;
-      default:
-        this._times = opts;
-        break;
-    }
-    this._iterate();
-  }
-
-  _iterate() {
-    callProxyReciever(call0(this._handler), this, undefined);
-  }
-
-  _callResolve(value) {
-    this._promise._resolve(value);
-  }
-
-  _callReject(reason) {
-    if (++this._count === this._times) {
-      this._promise._reject(reason);
-    } else if (this._interval !== undefined) {
-      setTimeout(this._iterate, this._interval(this._count));
-    } else {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = retry;
-
-/**
- * @param {Integer|Object} [times=5]
- * @param {Function} handler
- * @example
- * let called = 0;
- * Aigle.retry(3, () => {
- *   return new Aigle((resolve, reject) => {
- *     setTimeout(() => reject(++called), 10);
- *   });
- * })
- * .catch(error => {
- *   console.log(error); // 3
- *   console.log(called); // 3
- * });
- *
- * @example
- * let called = 0;
- * Aigle.retry(() => {
- *   return new Aigle((resolve, reject) => {
- *     setTimeout(() => reject(++called), 10);
- *   });
- * })
- * .catch(error => {
- *   console.log(error); // 5
- *   console.log(called); // 5
- * });
- *
- * @example
- * let called = 0;
- * const opts = {
- *   times: 5,
- *   interval: 10
- * };
- * Aigle.retry(opts, () => {
- *   return new Aigle((resolve, reject) => {
- *     setTimeout(() => reject(++called), 10);
- *   });
- * })
- * .catch(error => {
- *   console.log(error); // 5
- *   console.log(called); // 5
- * });
- *
- * @example
- * let called = 0;
- * const opts = {
- *   times: 5,
- *   interval: c => c * 2;
- * };
- * Aigle.retry(opts, () => {
- *   return new Aigle((resolve, reject) => {
- *     setTimeout(() => reject(++called), 10);
- *   });
- * })
- * .catch(error => {
- *   console.log(error); // 5
- *   console.log(called); // 5
- * });
- */
-function retry(opts, handler) {
-  return new Retry(opts, handler)._promise;
-}
-
-
-/***/ }),
-
-/***/ 9429:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const {
-  INTERNAL,
-  PENDING,
-  promiseArrayIterator,
-  promiseObjectIterator,
-  promiseSetIterator,
-  promiseMapIterator,
-  iteratorSymbol
-} = __nccwpck_require__(1783);
-const { execute } = __nccwpck_require__(6198);
-
-class Series extends AigleProxy {
-  constructor(coll) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._index = -1;
-    this._coll = undefined;
-    this._keys = undefined;
-    this._rest = undefined;
-    this._result = undefined;
-    this._iterate = undefined;
-    if (coll === PENDING) {
-      this._set = set;
-      this._iterate = this._callResolve;
-      this._callResolve = execute;
-    } else {
-      set.call(this, coll);
-    }
-  }
-
-  _execute() {
-    this._iterate();
-    return this._promise;
-  }
-
-  _callResolve(value, key) {
-    this._result[key] = value;
-    this._iterate();
-  }
-
-  _callResolveMap(value, key) {
-    this._result.set(key, value);
-    this._iterate();
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { series, Series };
-
-function set(coll) {
-  this._coll = coll;
-  this._iterate = iterate;
-  if (Array.isArray(coll)) {
-    const size = coll.length;
-    this._rest = size;
-    this._result = Array(size);
-    this._iterator = promiseArrayIterator;
-  } else if (typeof coll !== 'object' || coll === null) {
-    this._rest = 0;
-    this._result = {};
-  } else if (coll[iteratorSymbol]) {
-    this._coll = coll[iteratorSymbol]();
-    const size = coll.size;
-    this._rest = size;
-    if (coll instanceof Map) {
-      const result = new Map();
-      this._result = result;
-      this._callResolve = this._callResolveMap;
-      this._iterator = promiseMapIterator;
-    } else {
-      this._result = [];
-      this._iterator = promiseSetIterator;
-    }
-  } else {
-    const result = {};
-    const keys = Object.keys(coll);
-    this._rest = keys.length;
-    this._keys = keys;
-    this._result = result;
-    this._iterator = promiseObjectIterator;
-  }
-  return this;
-}
-
-function iterate() {
-  if (++this._index === this._rest) {
-    this._promise._resolve(this._result);
-  } else {
-    this._iterator(this, this._coll, this._index, this._result, this._keys);
-  }
-}
-
-/**
- * `Aigle.series` functionality has the same functionality as [`Aigle.parallel`](https://suguru03.github.io/aigle/docs/global.html#parallel)
- * and it works in series.
- * @param {Array|Object} collection - it should be an array/object of functions or Promise instances
- * @example
- *   Aigle.series([
- *     () => Aigle.delay(30, 1),
- *     Aigle.delay(20, 2),
- *     3
- *   ]).then(array => {
- *     console.log(array); // [1, 2, 3]
- *   });
- *
- * @example
- *   Aigle.series({
- *     a: () => Aigle.delay(30, 1),
- *     b: Aigle.delay(20, 2),
- *     c: 3
- *   }).then(obj => {
- *     console.log(obj); // { a: 1, b: 2, c: 3 }
- *   });
- */
-function series(collection) {
-  return new Series(collection)._execute();
-}
-
-
-/***/ }),
-
-/***/ 530:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-
-class Some extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, setShorthand);
-    this._result = false;
-  }
-
-  _callResolve(value) {
-    if (value) {
-      this._promise._resolve(true);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(false);
-    }
-  }
-}
-
-module.exports = { some, Some };
-
-/**
- * `Aigle.some` has almost the same functionality as `Array#some`.
- * It iterates all elements of `collection` and executes `iterator` using each element on parallel.
- * The `iterator` needs to return a promise or something..
- * If a promise is returned, the function will wait until the promise is fulfilled.
- * If the result is truthy, the function will return true otherwise false.
- * @param {Array|Object} collection
- * @param {Function|Array|Object|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.some(collection, iterator)
- *   .then(bool => {
- *     console.log(bool); // true
- *     console.log(order); // [1, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.some(collection, iterator)
- *   .then(bool => {
- *     console.log(bool); // true
- *     console.log(order); // [1, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return false;
- *     });
- * };
- * Aigle.some(collection, iterator)
- *   .then(bool => {
- *     console.log(bool); // false
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const collection = [{
- *  uid: 1, active: false
- * }, {
- *  uid: 4, active: true
- * }, {
- *  uid: 2, active: true
- * }];
- * Aigle.some(collection, 'active')
- *   .then(value => console.log(value)); // true
- *
- * @example
- * const collection = [{
- *  uid: 1, active: false
- * }, {
- *  uid: 4, active: true
- * }, {
- *  uid: 2, active: true
- * }];
- * Aigle.some(collection, ['uid', 4])
- *   .then(value => console.log(value)); // true
- *
- * @example
- * const collection = [{
- *  uid: 1, active: false
- * }, {
- *  uid: 4, active: true
- * }, {
- *  uid: 2, active: true
- * }];
- * Aigle.some(collection, { uid: 4 })
- *   .then(value => console.log(value)); // true
- */
-function some(collection, iterator) {
-  return new Some(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 810:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-
-class SomeLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator);
-    this._result = false;
-  }
-
-  _callResolve(value) {
-    if (value) {
-      this._promise._resolve(true);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(false);
-    } else if (this._callRest-- > 0) {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { someLimit, SomeLimit };
-
-/**
- * `Aigle.someLimit` is almost the as [`Aigle.some`](https://suguru03.github.io/aigle/docs/Aigle.html#some) and
- * [`Aigle.someSeries`](https://suguru03.github.io/aigle/docs/Aigle.html#someSeries), but it will work with concurrency.
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.someLimit(collection, 2, iterator)
- *   .then(bool => {
- *     console.log(bool); // true
- *     console.log(order); // [1, 3, 5, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.someLimit(collection, 2, iterator)
- *   .then(bool => {
- *     console.log(bool); // true
- *     console.log(order); // [1, 3, 5, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.someLimit(collection, iterator)
- *   .then(bool => {
- *     console.log(bool); // true
- *     console.log(order); // [1, 2]
- *   });
- */
-function someLimit(collection, limit, iterator) {
-  return new SomeLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 6383:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-
-class SomeSeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator);
-    this._result = false;
-  }
-
-  _callResolve(value) {
-    if (value) {
-      this._promise._resolve(true);
-    } else if (--this._rest === 0) {
-      this._promise._resolve(false);
-    } else {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { someSeries, SomeSeries };
-
-/**
- * `Aigle.someSeries` is almost the as [`Aigle.some`](https://suguru03.github.io/aigle/docs/Aigle.html#some), but it will work in series.
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.someSeries(collection, iterator)
- *   .then(bool => {
- *     console.log(bool); // true
- *     console.log(order); // [1, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num % 2 === 0;
- *     });
- * };
- * Aigle.someSeries(collection, iterator)
- *   .then(bool => {
- *     console.log(bool); // true
- *     console.log(order); // [1, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return false;
- *     });
- * };
- * Aigle.someSeries(collection, iterator)
- *   .then(bool => {
- *     console.log(bool); // false
- *     console.log(order); // [1, 4, 2]
- *   });
- */
-function someSeries(collection, iterator) {
-  return new SomeSeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 9996:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setShorthand } = __nccwpck_require__(6198);
-const { sortArray, sortObject } = __nccwpck_require__(1783);
-
-class SortBy extends Each {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-module.exports = { sortBy, SortBy };
-
-function set(collection) {
-  setShorthand.call(this, collection);
-  this._result = Array(this._rest);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(criterion, index) {
-  this._result[index] = criterion;
-  if (--this._rest === 0) {
-    this._promise._resolve(sortArray(this._coll, this._result));
-  }
-}
-
-function callResolveObject(criterion, index) {
-  this._result[index] = criterion;
-  if (--this._rest === 0) {
-    this._promise._resolve(sortObject(this._coll, this._keys, this._result));
-  }
-}
-
-/**
- * It iterates all elements of `collection` and executes `iterator` using each element on parallel.
- * It creates a sorted array which is ordered by results of iterator.
- * @param {Array|Object} collection
- * @param {Function|string} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.sortBy(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 4]
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.sortBy(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 4]
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [{
- *   uid: 2, name: 'bargey', uid: 2
- * }, {
- *   uid: 1, name: 'fread'
- * }];
- * Aigle.sortBy(collection, 'uid')
- *   .then(array => {
- *     console.log(array); // [{ uid: 1, name: 'fread' }, { uid: 2, name: 'bargey' ]
- *   });
- */
-function sortBy(collection, iterator) {
-  return new SortBy(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 516:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-const { sortArray, sortObject } = __nccwpck_require__(1783);
-
-class SortByLimit extends EachLimit {
-  constructor(collection, limit, iterator) {
-    super(collection, limit, iterator, set);
-  }
-}
-
-module.exports = { sortByLimit, SortByLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  this._result = Array(this._rest);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(criterion, index) {
-  this._result[index] = criterion;
-  if (--this._rest === 0) {
-    this._promise._resolve(sortArray(this._coll, this._result));
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-function callResolveObject(criterion, index) {
-  this._result[index] = criterion;
-  if (--this._rest === 0) {
-    this._promise._resolve(sortObject(this._coll, this._keys, this._result));
-  } else if (this._callRest-- > 0) {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.sortByLimit` is almost the smae as [`Aigle.sortBy`](https://suguru03.github.io/aigle/docs/Aigle.html#sortBy) and
- * [`Aigle.sortBySeries`](https://suguru03.github.io/aigle/docs/Aigle.html#sortBySeries), but it will work with concurrency.
- * @param {Array|Object} collection
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.sortByLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 3, 4, 5]
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.sortByLimit(collection, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 3, 4, 5]
- *     console.log(order); // [1, 3, 5, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.sortByLimit(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 3, 4, 5]
- *     console.log(order); // [1, 2, 3, 4, 5]
- *   });
- */
-function sortByLimit(collection, limit, iterator) {
-  return new SortByLimit(collection, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 240:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-const { sortArray, sortObject } = __nccwpck_require__(1783);
-
-class SortBySeries extends EachSeries {
-  constructor(collection, iterator) {
-    super(collection, iterator, set);
-  }
-}
-
-module.exports = { sortBySeries, SortBySeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  this._result = Array(this._rest);
-  this._callResolve = this._keys === undefined ? callResolveArray : callResolveObject;
-  return this;
-}
-
-function callResolveArray(criterion, index) {
-  this._result[index] = criterion;
-  if (--this._rest === 0) {
-    this._promise._resolve(sortArray(this._coll, this._result));
-  } else {
-    this._iterate();
-  }
-}
-
-function callResolveObject(criterion, index) {
-  this._result[index] = criterion;
-  if (--this._rest === 0) {
-    this._promise._resolve(sortObject(this._coll, this._keys, this._result));
-  } else {
-    this._iterate();
-  }
-}
-
-/**
- * `Aigle.sortBySeries` is almost the smae as [`Aigle.sortBy`](https://suguru03.github.io/aigle/docs/Aigle.html#sortBy), but it will work in series.
- *
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.sortBySeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 4]
- *     console.log(order); // [1, 4, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = num => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       return num;
- *     });
- * };
- * Aigle.sortBySeries(collection, iterator)
- *   .then(array => {
- *     console.log(array); // [1, 2, 4]
- *     console.log(order); // [1, 4, 2]
- *   });
- */
-function sortBySeries(collection, iterator) {
-  return new SortBySeries(collection, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 7678:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, callResolve } = __nccwpck_require__(1783);
-
-// TODO refactor
-function tap(value, onFulfilled) {
-  const promise = new Aigle(INTERNAL);
-  callResolve(promise, onFulfilled, value);
-  return promise.then(() => value);
-}
-
-module.exports = tap;
-
-
-/***/ }),
-
-/***/ 5193:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, callResolve } = __nccwpck_require__(1783);
-
-function thru(value, onFulfilled) {
-  const promise = new Aigle(INTERNAL);
-  callResolve(promise, onFulfilled, value);
-  return promise;
-}
-
-module.exports = thru;
-
-
-/***/ }),
-
-/***/ 8528:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { TimeoutError } = __nccwpck_require__(1519);
-const { INTERNAL } = __nccwpck_require__(1783);
-
-class Timeout extends AigleProxy {
-  constructor(ms, message = 'operation timed out') {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._timer = setTimeout(
-      () => this._callReject(message instanceof Error ? message : new TimeoutError(message)),
-      ms
-    );
-  }
-
-  _callResolve(value) {
-    clearTimeout(this._timer);
-    this._promise._resolve(value);
-  }
-
-  _callReject(reason) {
-    clearTimeout(this._timer);
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = Timeout;
-
-
-/***/ }),
-
-/***/ 7949:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, PENDING, defaultIterator, call1, callProxyReciever } = __nccwpck_require__(1783);
-
-class Times extends AigleProxy {
-  constructor(times, iterator) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._iterator = typeof iterator === 'function' ? iterator : defaultIterator;
-    this._rest = undefined;
-    this._result = undefined;
-    if (times === PENDING) {
-      this._rest = this._callResolve;
-      this._callResolve = execute;
-    } else {
-      set.call(this, times);
-    }
-  }
-
-  _execute() {
-    if (this._rest >= 1) {
-      const { _rest, _iterator } = this;
-      let i = -1;
-      while (++i < _rest && callProxyReciever(call1(_iterator, i), this, i)) {}
-    } else {
-      this._promise._resolve(this._result);
-    }
-    return this._promise;
-  }
-
-  _callResolve(value, index) {
-    this._result[index] = value;
-    if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    }
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { times, Times, set, execute };
-
-function set(times) {
-  times = +times | 0;
-  if (times >= 1) {
-    this._rest = times;
-    this._result = Array(times);
-  } else {
-    this._rest = 0;
-    this._result = [];
-  }
-}
-
-function execute(times) {
-  this._callResolve = this._rest;
-  set.call(this, times);
-  this._execute();
-}
-
-/**
- * @param {integer} times
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const timer = [30, 20, 10];
- * const iterator = n => {
- *   return Aigle.delay(timer[n])
- *     .then(() => {
- *       order.push(n);
- *       return n;
- *     });
- * };
- * Aigle.times(3, iterator)
- *   .then(array => {
- *     console.log(array); // [0, 1, 2]
- *     console.log(order); // [2, 1, 0]
- *   });
- */
-function times(times, iterator) {
-  return new Times(times, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 5545:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const {
-  INTERNAL,
-  PENDING,
-  DEFAULT_LIMIT,
-  defaultIterator,
-  call1,
-  callProxyReciever
-} = __nccwpck_require__(1783);
-
-class TimesLimit extends AigleProxy {
-  constructor(times, limit, iterator) {
-    super();
-    if (typeof limit === 'function') {
-      iterator = limit;
-      limit = DEFAULT_LIMIT;
-    }
-    this._promise = new Aigle(INTERNAL);
-    this._index = 0;
-    this._limit = limit;
-    this._iterator = typeof iterator === 'function' ? iterator : defaultIterator;
-    this._rest = undefined;
-    this._result = undefined;
-    this._callRest = undefined;
-    if (times === PENDING) {
-      this._rest = this._callResolve;
-      this._callResolve = execute;
-    } else {
-      set.call(this, times);
-    }
-  }
-
-  _execute() {
-    if (this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      while (this._limit--) {
-        this._iterate();
-      }
-    }
-    return this._promise;
-  }
-
-  _iterate() {
-    const i = this._index++;
-    callProxyReciever(call1(this._iterator, i), this, i);
-  }
-
-  _callResolve(value, index) {
-    this._result[index] = value;
-    if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else if (this._callRest-- > 0) {
-      this._iterate();
-    }
-  }
-
-  _callReject(reason) {
-    this._callRest = 0;
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { timesLimit, TimesLimit };
-
-function set(times) {
-  times = +times | 0;
-  if (times >= 1) {
-    this._rest = times;
-    this._result = Array(times);
-    const { _limit } = this;
-    this._limit = _limit < times ? _limit : times;
-    this._callRest = times - this._limit;
-  } else {
-    this._rest = 0;
-    this._result = [];
-  }
-}
-
-function execute(times) {
-  this._callResolve = this._rest;
-  set.call(this, times);
-  this._execute();
-}
-
-/**
- * @param {integer} times
- * @param {integer} [limit=8]
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const timer = [30, 20, 10];
- * const iterator = n => {
- *   return Aigle.delay(timer[n])
- *     .then(() => {
- *       order.push(n);
- *       return n;
- *     });
- * };
- * Aigle.timesLimit(3, 2, iterator)
- *   .then(array => {
- *     console.log(array); // [0, 1, 2]
- *     console.log(order); // [1, 0, 2]
- *   });
- *
- * @example
- * const order = [];
- * const timer = [30, 20, 10];
- * const iterator = n => {
- *   return Aigle.delay(timer[n])
- *     .then(() => {
- *       order.push(n);
- *       return n;
- *     });
- * };
- * Aigle.timesLimit(3, iterator)
- *   .then(array => {
- *     console.log(array); // [0, 1, 2]
- *     console.log(order); // [2, 1, 0]
- *   });
- */
-function timesLimit(times, limit, iterator) {
-  return new TimesLimit(times, limit, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 3864:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { set, execute } = __nccwpck_require__(7949);
-const { INTERNAL, PENDING, defaultIterator, call1, callProxyReciever } = __nccwpck_require__(1783);
-
-class TimesSeries extends AigleProxy {
-  constructor(times, iterator) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._iterator = typeof iterator === 'function' ? iterator : defaultIterator;
-    this._index = 0;
-    this._rest = undefined;
-    this._result = undefined;
-    if (times === PENDING) {
-      this._rest = this._callResolve;
-      this._callResolve = execute;
-    } else {
-      set.call(this, times);
-    }
-  }
-
-  _execute() {
-    if (this._rest >= 1) {
-      this._iterate();
-    } else {
-      this._promise._resolve(this._result);
-    }
-    return this._promise;
-  }
-
-  _iterate() {
-    const i = this._index++;
-    callProxyReciever(call1(this._iterator, i), this, i);
-  }
-
-  _callResolve(value, index) {
-    this._result[index] = value;
-    if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      this._iterate();
-    }
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { timesSeries, TimesSeries };
-
-/**
- * @param {integer} times
- * @param {Function} iterator
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const timer = [30, 20, 10];
- * const iterator = n => {
- *   return Aigle.delay(timer[n])
- *     .then(() => {
- *       order.push(n);
- *       return n;
- *     });
- * };
- * Aigle.timesSeries(3, iterator)
- *   .then(array => {
- *     console.log(array); // [0, 1, 2]
- *     console.log(order); // [0, 1, 2]
- *   });
- */
-function timesSeries(times, iterator) {
-  return new TimesSeries(times, iterator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 804:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { Each } = __nccwpck_require__(4881);
-const { setParallel } = __nccwpck_require__(6198);
-const { call3, callProxyReciever, clone } = __nccwpck_require__(1783);
-
-class Transform extends Each {
-  constructor(collection, iterator, accumulator) {
-    super(collection, iterator, set);
-    if (accumulator !== undefined) {
-      this._result = accumulator;
-    }
-  }
-
-  _callResolve(bool) {
-    if (bool === false) {
-      this._promise._resolve(clone(this._result));
-    } else if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    }
-  }
-}
-
-module.exports = { transform, Transform };
-
-function set(collection) {
-  setParallel.call(this, collection);
-  if (this._keys !== undefined || this._coll === undefined) {
-    if (this._result === undefined) {
-      this._result = {};
-    }
-    this._iterate = iterateObject;
-  } else {
-    if (this._result === undefined) {
-      this._result = [];
-    }
-    this._iterate = iterateArray;
-  }
-  return this;
-}
-
-function iterateArray() {
-  const { _rest, _result, _iterator, _coll } = this;
-  let i = -1;
-  while (++i < _rest && callProxyReciever(call3(_iterator, _result, _coll[i], i), this, i)) {}
-}
-
-function iterateObject() {
-  const { _rest, _result, _iterator, _coll, _keys } = this;
-  let i = -1;
-  while (++i < _rest) {
-    const key = _keys[i];
-    if (callProxyReciever(call3(_iterator, _result, _coll[key], key), this, i) === false) {
-      break;
-    }
-  }
-}
-
-/**
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @param {Array|Object} [accumulator]
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (result, num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result[index] = num;
- *     });
- * };
- * Aigle.transform(collection, iterator, {})
- *   .then(object => {
- *     console.log(object); // { '0': 1, '1': 4, '2': 2 }
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (result, num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result.push(num);
- *     });
- * };
- * Aigle.transform(collection, iterator, {})
- *   .then(array => {
- *     console.log(array); // [1, 2, 4]
- *     console.log(order); // [1, 2, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (result, num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result.push(num);
- *       return num !== 2;
- *     });
- * };
- * Aigle.transform(collection, iterator, [])
- *   .then(array => {
- *     console.log(array); // [1, 2]
- *     console.log(order); // [1, 2]
- *   });
- */
-function transform(collection, iterator, accumulator) {
-  return new Transform(collection, iterator, accumulator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 246:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachLimit } = __nccwpck_require__(2765);
-const { setLimit } = __nccwpck_require__(6198);
-const { DEFAULT_LIMIT, call3, callProxyReciever, clone } = __nccwpck_require__(1783);
-
-class TransformLimit extends EachLimit {
-  constructor(collection, limit, iterator, accumulator) {
-    if (typeof limit === 'function') {
-      accumulator = iterator;
-      iterator = limit;
-      limit = DEFAULT_LIMIT;
-    }
-    super(collection, limit, iterator, set);
-    if (accumulator !== undefined) {
-      this._result = accumulator;
-    }
-  }
-
-  _callResolve(bool) {
-    if (bool === false) {
-      this._promise._resolve(clone(this._result));
-    } else if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else if (this._callRest-- > 0) {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { transformLimit, TransformLimit };
-
-function set(collection) {
-  setLimit.call(this, collection);
-  if (this._keys !== undefined || this._coll === undefined) {
-    if (this._result === undefined) {
-      this._result = {};
-    }
-    this._iterate = iterateObject;
-  } else {
-    if (this._result === undefined) {
-      this._result = [];
-    }
-    this._iterate = iterateArray;
-  }
-  return this;
-}
-
-function iterateArray() {
-  const index = this._index++;
-  callProxyReciever(call3(this._iterator, this._result, this._coll[index], index), this, index);
-}
-
-function iterateObject() {
-  const index = this._index++;
-  const key = this._keys[index];
-  callProxyReciever(call3(this._iterator, this._result, this._coll[key], key), this, index);
-}
-
-/**
- * @param {Array|Object} collection
- * @param {integer} [limit]
- * @param {Function} iterator
- * @param {Array|Object} [accumulator]
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (result, num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result[index] = num;
- *     });
- * };
- * Aigle.transformLimit(collection, 2, iterator, {})
- *   .then(object => {
- *     console.log(object); // { '0': 1, '1': 5, '2': 3, '3': 4, '4': 2 }
- *     console.log(order); // [1, 5, 3, 4, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 5, 3, 4, 2];
- * const iterator = (result, num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result.push(num);
- *     });
- * };
- * Aigle.transformLimit(collection, 2, iterator, {})
- *   .then(array => {
- *     console.log(array); // [1, 5, 3, 4, 2]
- *     console.log(order); // [1, 5, 3, 4, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (result, num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result.push(num);
- *       return num !== 4;
- *     });
- * };
- * Aigle.transformLimit(collection, 2, iterator, [])
- *   .then(array => {
- *     console.log(array); // [1, 5, 3, 4]
- *     console.log(order); // [1, 5, 3, 4]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 5, c: 3, d: 4, e: 2 };
- * const iterator = (result, num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result.push(num);
- *       return num !== 4;
- *     });
- * };
- * Aigle.transformLimit(collection, iterator, [])
- *   .then(array => {
- *     console.log(array); // [1, 2, 3, 4]
- *     console.log(order); // [1, 2, 3, 4]
- *   });
- */
-function transformLimit(collection, limit, iterator, accumulator) {
-  return new TransformLimit(collection, limit, iterator, accumulator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 9589:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { EachSeries } = __nccwpck_require__(9508);
-const { setSeries } = __nccwpck_require__(6198);
-const { call3, callProxyReciever, clone } = __nccwpck_require__(1783);
-
-class TransformSeries extends EachSeries {
-  constructor(collection, iterator, accumulator) {
-    super(collection, iterator, set);
-    if (accumulator !== undefined) {
-      this._result = accumulator;
-    }
-  }
-
-  _callResolve(bool) {
-    if (bool === false) {
-      this._promise._resolve(clone(this._result));
-    } else if (--this._rest === 0) {
-      this._promise._resolve(this._result);
-    } else {
-      this._iterate();
-    }
-  }
-}
-
-module.exports = { transformSeries, TransformSeries };
-
-function set(collection) {
-  setSeries.call(this, collection);
-  if (this._keys !== undefined || this._coll === undefined) {
-    if (this._result === undefined) {
-      this._result = {};
-    }
-    this._iterate = iterateObject;
-  } else {
-    if (this._result === undefined) {
-      this._result = [];
-    }
-    this._iterate = iterateArray;
-  }
-  return this;
-}
-
-function iterateArray() {
-  const index = this._index++;
-  callProxyReciever(call3(this._iterator, this._result, this._coll[index], index), this, index);
-}
-
-function iterateObject() {
-  const index = this._index++;
-  const key = this._keys[index];
-  callProxyReciever(call3(this._iterator, this._result, this._coll[key], key), this, index);
-}
-
-/**
- * @param {Array|Object} collection
- * @param {Function} iterator
- * @param {Array|Object} [accumulator]
- * @return {Aigle} Returns an Aigle instance
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (result, num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result[index] = num;
- *     });
- * };
- * Aigle.transformSeries(collection, iterator, {})
- *   .then(object => {
- *     console.log(object); // { '0': 1, '1': 4, '2': 2 }
- *     console.log(order); // [1, 4, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = [1, 4, 2];
- * const iterator = (result, num, index) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result.push(num);
- *     });
- * };
- * Aigle.transformSeries(collection, iterator, {})
- *   .then(array => {
- *     console.log(array); // [1, 4, 2]
- *     console.log(order); // [1, 4, 2]
- *   });
- *
- * @example
- * const order = [];
- * const collection = { a: 1, b: 4, c: 2 };
- * const iterator = (result, num, key) => {
- *   return Aigle.delay(num * 10)
- *     .then(() => {
- *       order.push(num);
- *       result.push(num);
- *       return num !== 4;
- *     });
- * };
- * Aigle.transformSeries(collection, iterator, [])
- *   .then(array => {
- *     console.log(array); // [1, 4]
- *     console.log(order); // [1, 4]
- *   });
- */
-function transformSeries(collection, iterator, accumulator) {
-  return new TransformSeries(collection, iterator, accumulator)._execute();
-}
-
-
-/***/ }),
-
-/***/ 1891:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleWhilst, WhilstTester } = __nccwpck_require__(2043);
-
-class UntilTester extends WhilstTester {
-  constructor(tester) {
-    super(tester);
-  }
-
-  _callResolve(value) {
-    if (value) {
-      this._proxy._promise._resolve(this._value);
-    } else {
-      this._proxy._next(this._value);
-    }
-  }
-}
-
-module.exports = { until, UntilTester };
-
-/**
- * @param {*} [value]
- * @param {Function} tester
- * @param {Function} iterator
- */
-function until(value, tester, iterator) {
-  if (typeof iterator !== 'function') {
-    iterator = tester;
-    tester = value;
-    value = undefined;
-  }
-  return new AigleWhilst(new UntilTester(tester), iterator)._iterate(value);
-}
-
-
-/***/ }),
-
-/***/ 5523:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, apply, call1, callProxyReciever } = __nccwpck_require__(1783);
-
-const DISPOSER = {};
-
-class Disposer {
-  constructor(promise, handler) {
-    this._promise = promise;
-    this._handler = handler;
-  }
-
-  _dispose() {
-    const { _promise } = this;
-    switch (_promise._resolved) {
-      case 0:
-        return _promise.then(() => this._dispose());
-      case 1:
-        return call1(this._handler, this._promise._value);
-    }
-  }
-}
-
-class Using extends AigleProxy {
-  constructor(array, handler) {
-    super();
-    const size = array.length;
-    this._promise = new Aigle(INTERNAL);
-    this._rest = size;
-    this._disposed = size;
-    this._array = array;
-    this._error = undefined;
-    this._result = Array(size);
-    this._handler = handler;
-    let i = -1;
-    while (++i < size) {
-      const disposer = array[i];
-      if (disposer instanceof Disposer === false) {
-        callProxyReciever(disposer, this, i);
-      } else {
-        callProxyReciever(disposer._promise, this, i);
-      }
-    }
-  }
-
-  _spread() {
-    const { _handler, _result } = this;
-    if (typeof _handler !== 'function') {
-      return this._callResolve(undefined, INTERNAL);
-    }
-    callProxyReciever(apply(_handler, _result), this, INTERNAL);
-  }
-
-  _release() {
-    const { _array } = this;
-    let l = _array.length;
-    while (l--) {
-      const disposer = _array[l];
-      if (disposer instanceof Disposer === false) {
-        this._callResolve(disposer, DISPOSER);
-      } else {
-        callProxyReciever(disposer._dispose(), this, DISPOSER);
-      }
-    }
-  }
-
-  _callResolve(value, index) {
-    if (index === INTERNAL) {
-      this._result = value;
-      return this._release();
-    }
-    if (index === DISPOSER) {
-      if (--this._disposed === 0) {
-        if (this._error) {
-          this._promise._reject(this._error);
-        } else {
-          this._promise._resolve(this._result);
-        }
-      }
-      return;
-    }
-    this._result[index] = value;
-    if (--this._rest === 0) {
-      this._spread();
-    }
-  }
-
-  _callReject(reason) {
-    if (this._error) {
-      return this._promise._reject(reason);
-    }
-    this._error = reason;
-    this._release();
-  }
-}
-
-module.exports = { using, Disposer };
-
-function using() {
-  let l = arguments.length;
-  const handler = arguments[--l];
-  const array = Array(l);
-  while (l--) {
-    array[l] = arguments[l];
-  }
-  return new Using(array, handler)._promise;
-}
-
-
-/***/ }),
-
-/***/ 2043:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-const { AigleProxy } = __nccwpck_require__(9058);
-
-const Aigle = __nccwpck_require__(5306);
-const { INTERNAL, callProxyReciever, call1 } = __nccwpck_require__(1783);
-
-class WhilstTester extends AigleProxy {
-  constructor(tester) {
-    super();
-    this._tester = tester;
-    this._proxy = undefined;
-    this._value = undefined;
-  }
-
-  _test(value) {
-    this._value = value;
-    callProxyReciever(call1(this._tester, value), this, undefined);
-  }
-
-  _callResolve(value) {
-    if (value) {
-      this._proxy._next(this._value);
-    } else {
-      this._proxy._promise._resolve(this._value);
-    }
-  }
-
-  _callReject(reason) {
-    this._proxy._callReject(reason);
-  }
-}
-
-class AigleWhilst extends AigleProxy {
-  constructor(tester, iterator) {
-    super();
-    this._promise = new Aigle(INTERNAL);
-    this._tester = tester;
-    this._iterator = iterator;
-    tester._proxy = this;
-  }
-
-  _iterate(value) {
-    this._callResolve(value);
-    return this._promise;
-  }
-
-  _next(value) {
-    callProxyReciever(call1(this._iterator, value), this, undefined);
-  }
-
-  _callResolve(value) {
-    this._tester._test(value);
-  }
-
-  _callReject(reason) {
-    this._promise._reject(reason);
-  }
-}
-
-module.exports = { whilst, AigleWhilst, WhilstTester };
-
-/**
- * @param {*} [value]
- * @param {Function} tester
- * @param {Function} iterator
- */
-function whilst(value, tester, iterator) {
-  if (typeof iterator !== 'function') {
-    iterator = tester;
-    tester = value;
-    value = undefined;
-  }
-  return new AigleWhilst(new WhilstTester(tester), iterator)._iterate(value);
-}
-
-
-/***/ }),
-
-/***/ 3682:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-var register = __nccwpck_require__(4670)
-var addHook = __nccwpck_require__(5549)
-var removeHook = __nccwpck_require__(6819)
-
-// bind with array of arguments: https://stackoverflow.com/a/21792913
-var bind = Function.bind
-var bindable = bind.bind(bind)
-
-function bindApi (hook, state, name) {
-  var removeHookRef = bindable(removeHook, null).apply(null, name ? [state, name] : [state])
-  hook.api = { remove: removeHookRef }
-  hook.remove = removeHookRef
-
-  ;['before', 'error', 'after', 'wrap'].forEach(function (kind) {
-    var args = name ? [state, kind, name] : [state, kind]
-    hook[kind] = hook.api[kind] = bindable(addHook, null).apply(null, args)
-  })
-}
-
-function HookSingular () {
-  var singularHookName = 'h'
-  var singularHookState = {
-    registry: {}
-  }
-  var singularHook = register.bind(null, singularHookState, singularHookName)
-  bindApi(singularHook, singularHookState, singularHookName)
-  return singularHook
-}
-
-function HookCollection () {
-  var state = {
-    registry: {}
-  }
-
-  var hook = register.bind(null, state)
-  bindApi(hook, state)
-
-  return hook
-}
-
-var collectionHookDeprecationMessageDisplayed = false
-function Hook () {
-  if (!collectionHookDeprecationMessageDisplayed) {
-    console.warn('[before-after-hook]: "Hook()" repurposing warning, use "Hook.Collection()". Read more: https://git.io/upgrade-before-after-hook-to-1.4')
-    collectionHookDeprecationMessageDisplayed = true
-  }
-  return HookCollection()
-}
-
-Hook.Singular = HookSingular.bind()
-Hook.Collection = HookCollection.bind()
-
-module.exports = Hook
-// expose constructors as a named property for TypeScript
-module.exports.Hook = Hook
-module.exports.Singular = Hook.Singular
-module.exports.Collection = Hook.Collection
-
-
-/***/ }),
-
-/***/ 5549:
-/***/ ((module) => {
-
-module.exports = addHook;
-
-function addHook(state, kind, name, hook) {
-  var orig = hook;
-  if (!state.registry[name]) {
-    state.registry[name] = [];
-  }
-
-  if (kind === "before") {
-    hook = function (method, options) {
-      return Promise.resolve()
-        .then(orig.bind(null, options))
-        .then(method.bind(null, options));
-    };
-  }
-
-  if (kind === "after") {
-    hook = function (method, options) {
-      var result;
-      return Promise.resolve()
-        .then(method.bind(null, options))
-        .then(function (result_) {
-          result = result_;
-          return orig(result, options);
-        })
-        .then(function () {
-          return result;
-        });
-    };
-  }
-
-  if (kind === "error") {
-    hook = function (method, options) {
-      return Promise.resolve()
-        .then(method.bind(null, options))
-        .catch(function (error) {
-          return orig(error, options);
-        });
-    };
-  }
-
-  state.registry[name].push({
-    hook: hook,
-    orig: orig,
-  });
-}
-
-
-/***/ }),
-
-/***/ 4670:
-/***/ ((module) => {
-
-module.exports = register;
-
-function register(state, name, method, options) {
-  if (typeof method !== "function") {
-    throw new Error("method for before hook must be a function");
-  }
-
-  if (!options) {
-    options = {};
-  }
-
-  if (Array.isArray(name)) {
-    return name.reverse().reduce(function (callback, name) {
-      return register.bind(null, state, name, callback, options);
-    }, method)();
-  }
-
-  return Promise.resolve().then(function () {
-    if (!state.registry[name]) {
-      return method(options);
-    }
-
-    return state.registry[name].reduce(function (method, registered) {
-      return registered.hook.bind(null, method, options);
-    }, method)();
-  });
-}
-
-
-/***/ }),
-
-/***/ 6819:
-/***/ ((module) => {
-
-module.exports = removeHook;
-
-function removeHook(state, name, method) {
-  if (!state.registry[name]) {
-    return;
-  }
-
-  var index = state.registry[name]
-    .map(function (registered) {
-      return registered.orig;
-    })
-    .indexOf(method);
-
-  if (index === -1) {
-    return;
-  }
-
-  state.registry[name].splice(index, 1);
-}
-
-
-/***/ }),
-
-/***/ 8932:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-class Deprecation extends Error {
-  constructor(message) {
-    super(message); // Maintains proper stack trace (only available on V8)
-
-    /* istanbul ignore next */
-
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, this.constructor);
-    }
-
-    this.name = 'Deprecation';
-  }
-
-}
-
-exports.Deprecation = Deprecation;
-
-
-/***/ }),
-
-/***/ 3287:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-/*!
- * is-plain-object <https://github.com/jonschlinkert/is-plain-object>
- *
- * Copyright (c) 2014-2017, Jon Schlinkert.
- * Released under the MIT License.
- */
-
-function isObject(o) {
-  return Object.prototype.toString.call(o) === '[object Object]';
-}
-
-function isPlainObject(o) {
-  var ctor,prot;
-
-  if (isObject(o) === false) return false;
-
-  // If has modified constructor
-  ctor = o.constructor;
-  if (ctor === undefined) return true;
-
-  // If has modified prototype
-  prot = ctor.prototype;
-  if (isObject(prot) === false) return false;
-
-  // If constructor does not have an Object-specific method
-  if (prot.hasOwnProperty('isPrototypeOf') === false) {
-    return false;
-  }
-
-  // Most likely a plain Object
-  return true;
-}
-
-exports.isPlainObject = isPlainObject;
-
-
-/***/ }),
-
-/***/ 1917:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-
-var loader = __nccwpck_require__(1161);
-var dumper = __nccwpck_require__(8866);
-
-
-function renamed(from, to) {
-  return function () {
-    throw new Error('Function yaml.' + from + ' is removed in js-yaml 4. ' +
-      'Use yaml.' + to + ' instead, which is now safe by default.');
-  };
-}
-
-
-module.exports.Type = __nccwpck_require__(6073);
-module.exports.Schema = __nccwpck_require__(1082);
-module.exports.FAILSAFE_SCHEMA = __nccwpck_require__(8562);
-module.exports.JSON_SCHEMA = __nccwpck_require__(1035);
-module.exports.CORE_SCHEMA = __nccwpck_require__(2011);
-module.exports.DEFAULT_SCHEMA = __nccwpck_require__(8759);
-module.exports.load                = loader.load;
-module.exports.loadAll             = loader.loadAll;
-module.exports.dump                = dumper.dump;
-module.exports.YAMLException = __nccwpck_require__(8179);
-
-// Removed functions from JS-YAML 3.0.x
-module.exports.safeLoad            = renamed('safeLoad', 'load');
-module.exports.safeLoadAll         = renamed('safeLoadAll', 'loadAll');
-module.exports.safeDump            = renamed('safeDump', 'dump');
-
-
-/***/ }),
-
-/***/ 6829:
-/***/ ((module) => {
-
-"use strict";
-
-
-
-function isNothing(subject) {
-  return (typeof subject === 'undefined') || (subject === null);
-}
-
-
-function isObject(subject) {
-  return (typeof subject === 'object') && (subject !== null);
-}
-
-
-function toArray(sequence) {
-  if (Array.isArray(sequence)) return sequence;
-  else if (isNothing(sequence)) return [];
-
-  return [ sequence ];
-}
-
-
-function extend(target, source) {
-  var index, length, key, sourceKeys;
-
-  if (source) {
-    sourceKeys = Object.keys(source);
-
-    for (index = 0, length = sourceKeys.length; index < length; index += 1) {
-      key = sourceKeys[index];
-      target[key] = source[key];
-    }
-  }
-
-  return target;
-}
-
-
-function repeat(string, count) {
-  var result = '', cycle;
-
-  for (cycle = 0; cycle < count; cycle += 1) {
-    result += string;
-  }
-
-  return result;
-}
-
-
-function isNegativeZero(number) {
-  return (number === 0) && (Number.NEGATIVE_INFINITY === 1 / number);
-}
-
-
-module.exports.isNothing      = isNothing;
-module.exports.isObject       = isObject;
-module.exports.toArray        = toArray;
-module.exports.repeat         = repeat;
-module.exports.isNegativeZero = isNegativeZero;
-module.exports.extend         = extend;
-
-
-/***/ }),
-
-/***/ 8866:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-/*eslint-disable no-use-before-define*/
-
-var common              = __nccwpck_require__(6829);
-var YAMLException       = __nccwpck_require__(8179);
-var DEFAULT_SCHEMA      = __nccwpck_require__(8759);
-
-var _toString       = Object.prototype.toString;
-var _hasOwnProperty = Object.prototype.hasOwnProperty;
-
-var CHAR_BOM                  = 0xFEFF;
-var CHAR_TAB                  = 0x09; /* Tab */
-var CHAR_LINE_FEED            = 0x0A; /* LF */
-var CHAR_CARRIAGE_RETURN      = 0x0D; /* CR */
-var CHAR_SPACE                = 0x20; /* Space */
-var CHAR_EXCLAMATION          = 0x21; /* ! */
-var CHAR_DOUBLE_QUOTE         = 0x22; /* " */
-var CHAR_SHARP                = 0x23; /* # */
-var CHAR_PERCENT              = 0x25; /* % */
-var CHAR_AMPERSAND            = 0x26; /* & */
-var CHAR_SINGLE_QUOTE         = 0x27; /* ' */
-var CHAR_ASTERISK             = 0x2A; /* * */
-var CHAR_COMMA                = 0x2C; /* , */
-var CHAR_MINUS                = 0x2D; /* - */
-var CHAR_COLON                = 0x3A; /* : */
-var CHAR_EQUALS               = 0x3D; /* = */
-var CHAR_GREATER_THAN         = 0x3E; /* > */
-var CHAR_QUESTION             = 0x3F; /* ? */
-var CHAR_COMMERCIAL_AT        = 0x40; /* @ */
-var CHAR_LEFT_SQUARE_BRACKET  = 0x5B; /* [ */
-var CHAR_RIGHT_SQUARE_BRACKET = 0x5D; /* ] */
-var CHAR_GRAVE_ACCENT         = 0x60; /* ` */
-var CHAR_LEFT_CURLY_BRACKET   = 0x7B; /* { */
-var CHAR_VERTICAL_LINE        = 0x7C; /* | */
-var CHAR_RIGHT_CURLY_BRACKET  = 0x7D; /* } */
-
-var ESCAPE_SEQUENCES = {};
-
-ESCAPE_SEQUENCES[0x00]   = '\\0';
-ESCAPE_SEQUENCES[0x07]   = '\\a';
-ESCAPE_SEQUENCES[0x08]   = '\\b';
-ESCAPE_SEQUENCES[0x09]   = '\\t';
-ESCAPE_SEQUENCES[0x0A]   = '\\n';
-ESCAPE_SEQUENCES[0x0B]   = '\\v';
-ESCAPE_SEQUENCES[0x0C]   = '\\f';
-ESCAPE_SEQUENCES[0x0D]   = '\\r';
-ESCAPE_SEQUENCES[0x1B]   = '\\e';
-ESCAPE_SEQUENCES[0x22]   = '\\"';
-ESCAPE_SEQUENCES[0x5C]   = '\\\\';
-ESCAPE_SEQUENCES[0x85]   = '\\N';
-ESCAPE_SEQUENCES[0xA0]   = '\\_';
-ESCAPE_SEQUENCES[0x2028] = '\\L';
-ESCAPE_SEQUENCES[0x2029] = '\\P';
-
-var DEPRECATED_BOOLEANS_SYNTAX = [
-  'y', 'Y', 'yes', 'Yes', 'YES', 'on', 'On', 'ON',
-  'n', 'N', 'no', 'No', 'NO', 'off', 'Off', 'OFF'
-];
-
-var DEPRECATED_BASE60_SYNTAX = /^[-+]?[0-9_]+(?::[0-9_]+)+(?:\.[0-9_]*)?$/;
-
-function compileStyleMap(schema, map) {
-  var result, keys, index, length, tag, style, type;
-
-  if (map === null) return {};
-
-  result = {};
-  keys = Object.keys(map);
-
-  for (index = 0, length = keys.length; index < length; index += 1) {
-    tag = keys[index];
-    style = String(map[tag]);
-
-    if (tag.slice(0, 2) === '!!') {
-      tag = 'tag:yaml.org,2002:' + tag.slice(2);
-    }
-    type = schema.compiledTypeMap['fallback'][tag];
-
-    if (type && _hasOwnProperty.call(type.styleAliases, style)) {
-      style = type.styleAliases[style];
-    }
-
-    result[tag] = style;
-  }
-
-  return result;
-}
-
-function encodeHex(character) {
-  var string, handle, length;
-
-  string = character.toString(16).toUpperCase();
-
-  if (character <= 0xFF) {
-    handle = 'x';
-    length = 2;
-  } else if (character <= 0xFFFF) {
-    handle = 'u';
-    length = 4;
-  } else if (character <= 0xFFFFFFFF) {
-    handle = 'U';
-    length = 8;
-  } else {
-    throw new YAMLException('code point within a string may not be greater than 0xFFFFFFFF');
-  }
-
-  return '\\' + handle + common.repeat('0', length - string.length) + string;
-}
-
-
-var QUOTING_TYPE_SINGLE = 1,
-    QUOTING_TYPE_DOUBLE = 2;
-
-function State(options) {
-  this.schema        = options['schema'] || DEFAULT_SCHEMA;
-  this.indent        = Math.max(1, (options['indent'] || 2));
-  this.noArrayIndent = options['noArrayIndent'] || false;
-  this.skipInvalid   = options['skipInvalid'] || false;
-  this.flowLevel     = (common.isNothing(options['flowLevel']) ? -1 : options['flowLevel']);
-  this.styleMap      = compileStyleMap(this.schema, options['styles'] || null);
-  this.sortKeys      = options['sortKeys'] || false;
-  this.lineWidth     = options['lineWidth'] || 80;
-  this.noRefs        = options['noRefs'] || false;
-  this.noCompatMode  = options['noCompatMode'] || false;
-  this.condenseFlow  = options['condenseFlow'] || false;
-  this.quotingType   = options['quotingType'] === '"' ? QUOTING_TYPE_DOUBLE : QUOTING_TYPE_SINGLE;
-  this.forceQuotes   = options['forceQuotes'] || false;
-  this.replacer      = typeof options['replacer'] === 'function' ? options['replacer'] : null;
-
-  this.implicitTypes = this.schema.compiledImplicit;
-  this.explicitTypes = this.schema.compiledExplicit;
-
-  this.tag = null;
-  this.result = '';
-
-  this.duplicates = [];
-  this.usedDuplicates = null;
-}
-
-// Indents every line in a string. Empty lines (\n only) are not indented.
-function indentString(string, spaces) {
-  var ind = common.repeat(' ', spaces),
-      position = 0,
-      next = -1,
-      result = '',
-      line,
-      length = string.length;
-
-  while (position < length) {
-    next = string.indexOf('\n', position);
-    if (next === -1) {
-      line = string.slice(position);
-      position = length;
-    } else {
-      line = string.slice(position, next + 1);
-      position = next + 1;
-    }
-
-    if (line.length && line !== '\n') result += ind;
-
-    result += line;
-  }
-
-  return result;
-}
-
-function generateNextLine(state, level) {
-  return '\n' + common.repeat(' ', state.indent * level);
-}
-
-function testImplicitResolving(state, str) {
-  var index, length, type;
-
-  for (index = 0, length = state.implicitTypes.length; index < length; index += 1) {
-    type = state.implicitTypes[index];
-
-    if (type.resolve(str)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-// [33] s-white ::= s-space | s-tab
-function isWhitespace(c) {
-  return c === CHAR_SPACE || c === CHAR_TAB;
-}
-
-// Returns true if the character can be printed without escaping.
-// From YAML 1.2: "any allowed characters known to be non-printable
-// should also be escaped. [However,] This isn’t mandatory"
-// Derived from nb-char - \t - #x85 - #xA0 - #x2028 - #x2029.
-function isPrintable(c) {
-  return  (0x00020 <= c && c <= 0x00007E)
-      || ((0x000A1 <= c && c <= 0x00D7FF) && c !== 0x2028 && c !== 0x2029)
-      || ((0x0E000 <= c && c <= 0x00FFFD) && c !== CHAR_BOM)
-      ||  (0x10000 <= c && c <= 0x10FFFF);
-}
-
-// [34] ns-char ::= nb-char - s-white
-// [27] nb-char ::= c-printable - b-char - c-byte-order-mark
-// [26] b-char  ::= b-line-feed | b-carriage-return
-// Including s-white (for some reason, examples doesn't match specs in this aspect)
-// ns-char ::= c-printable - b-line-feed - b-carriage-return - c-byte-order-mark
-function isNsCharOrWhitespace(c) {
-  return isPrintable(c)
-    && c !== CHAR_BOM
-    // - b-char
-    && c !== CHAR_CARRIAGE_RETURN
-    && c !== CHAR_LINE_FEED;
-}
-
-// [127]  ns-plain-safe(c) ::= c = flow-out  ⇒ ns-plain-safe-out
-//                             c = flow-in   ⇒ ns-plain-safe-in
-//                             c = block-key ⇒ ns-plain-safe-out
-//                             c = flow-key  ⇒ ns-plain-safe-in
-// [128] ns-plain-safe-out ::= ns-char
-// [129]  ns-plain-safe-in ::= ns-char - c-flow-indicator
-// [130]  ns-plain-char(c) ::=  ( ns-plain-safe(c) - “:” - “#” )
-//                            | ( /* An ns-char preceding */ “#” )
-//                            | ( “:” /* Followed by an ns-plain-safe(c) */ )
-function isPlainSafe(c, prev, inblock) {
-  var cIsNsCharOrWhitespace = isNsCharOrWhitespace(c);
-  var cIsNsChar = cIsNsCharOrWhitespace && !isWhitespace(c);
-  return (
-    // ns-plain-safe
-    inblock ? // c = flow-in
-      cIsNsCharOrWhitespace
-      : cIsNsCharOrWhitespace
-        // - c-flow-indicator
-        && c !== CHAR_COMMA
-        && c !== CHAR_LEFT_SQUARE_BRACKET
-        && c !== CHAR_RIGHT_SQUARE_BRACKET
-        && c !== CHAR_LEFT_CURLY_BRACKET
-        && c !== CHAR_RIGHT_CURLY_BRACKET
-  )
-    // ns-plain-char
-    && c !== CHAR_SHARP // false on '#'
-    && !(prev === CHAR_COLON && !cIsNsChar) // false on ': '
-    || (isNsCharOrWhitespace(prev) && !isWhitespace(prev) && c === CHAR_SHARP) // change to true on '[^ ]#'
-    || (prev === CHAR_COLON && cIsNsChar); // change to true on ':[^ ]'
-}
-
-// Simplified test for values allowed as the first character in plain style.
-function isPlainSafeFirst(c) {
-  // Uses a subset of ns-char - c-indicator
-  // where ns-char = nb-char - s-white.
-  // No support of ( ( “?” | “:” | “-” ) /* Followed by an ns-plain-safe(c)) */ ) part
-  return isPrintable(c) && c !== CHAR_BOM
-    && !isWhitespace(c) // - s-white
-    // - (c-indicator ::=
-    // “-” | “?” | “:” | “,” | “[” | “]” | “{” | “}”
-    && c !== CHAR_MINUS
-    && c !== CHAR_QUESTION
-    && c !== CHAR_COLON
-    && c !== CHAR_COMMA
-    && c !== CHAR_LEFT_SQUARE_BRACKET
-    && c !== CHAR_RIGHT_SQUARE_BRACKET
-    && c !== CHAR_LEFT_CURLY_BRACKET
-    && c !== CHAR_RIGHT_CURLY_BRACKET
-    // | “#” | “&” | “*” | “!” | “|” | “=” | “>” | “'” | “"”
-    && c !== CHAR_SHARP
-    && c !== CHAR_AMPERSAND
-    && c !== CHAR_ASTERISK
-    && c !== CHAR_EXCLAMATION
-    && c !== CHAR_VERTICAL_LINE
-    && c !== CHAR_EQUALS
-    && c !== CHAR_GREATER_THAN
-    && c !== CHAR_SINGLE_QUOTE
-    && c !== CHAR_DOUBLE_QUOTE
-    // | “%” | “@” | “`”)
-    && c !== CHAR_PERCENT
-    && c !== CHAR_COMMERCIAL_AT
-    && c !== CHAR_GRAVE_ACCENT;
-}
-
-// Simplified test for values allowed as the last character in plain style.
-function isPlainSafeLast(c) {
-  // just not whitespace or colon, it will be checked to be plain character later
-  return !isWhitespace(c) && c !== CHAR_COLON;
-}
-
-// Same as 'string'.codePointAt(pos), but works in older browsers.
-function codePointAt(string, pos) {
-  var first = string.charCodeAt(pos), second;
-  if (first >= 0xD800 && first <= 0xDBFF && pos + 1 < string.length) {
-    second = string.charCodeAt(pos + 1);
-    if (second >= 0xDC00 && second <= 0xDFFF) {
-      // https://mathiasbynens.be/notes/javascript-encoding#surrogate-formulae
-      return (first - 0xD800) * 0x400 + second - 0xDC00 + 0x10000;
-    }
-  }
-  return first;
-}
-
-// Determines whether block indentation indicator is required.
-function needIndentIndicator(string) {
-  var leadingSpaceRe = /^\n* /;
-  return leadingSpaceRe.test(string);
-}
-
-var STYLE_PLAIN   = 1,
-    STYLE_SINGLE  = 2,
-    STYLE_LITERAL = 3,
-    STYLE_FOLDED  = 4,
-    STYLE_DOUBLE  = 5;
-
-// Determines which scalar styles are possible and returns the preferred style.
-// lineWidth = -1 => no limit.
-// Pre-conditions: str.length > 0.
-// Post-conditions:
-//    STYLE_PLAIN or STYLE_SINGLE => no \n are in the string.
-//    STYLE_LITERAL => no lines are suitable for folding (or lineWidth is -1).
-//    STYLE_FOLDED => a line > lineWidth and can be folded (and lineWidth != -1).
-function chooseScalarStyle(string, singleLineOnly, indentPerLevel, lineWidth,
-  testAmbiguousType, quotingType, forceQuotes, inblock) {
-
-  var i;
-  var char = 0;
-  var prevChar = null;
-  var hasLineBreak = false;
-  var hasFoldableLine = false; // only checked if shouldTrackWidth
-  var shouldTrackWidth = lineWidth !== -1;
-  var previousLineBreak = -1; // count the first line correctly
-  var plain = isPlainSafeFirst(codePointAt(string, 0))
-          && isPlainSafeLast(codePointAt(string, string.length - 1));
-
-  if (singleLineOnly || forceQuotes) {
-    // Case: no block styles.
-    // Check for disallowed characters to rule out plain and single.
-    for (i = 0; i < string.length; char >= 0x10000 ? i += 2 : i++) {
-      char = codePointAt(string, i);
-      if (!isPrintable(char)) {
-        return STYLE_DOUBLE;
-      }
-      plain = plain && isPlainSafe(char, prevChar, inblock);
-      prevChar = char;
-    }
-  } else {
-    // Case: block styles permitted.
-    for (i = 0; i < string.length; char >= 0x10000 ? i += 2 : i++) {
-      char = codePointAt(string, i);
-      if (char === CHAR_LINE_FEED) {
-        hasLineBreak = true;
-        // Check if any line can be folded.
-        if (shouldTrackWidth) {
-          hasFoldableLine = hasFoldableLine ||
-            // Foldable line = too long, and not more-indented.
-            (i - previousLineBreak - 1 > lineWidth &&
-             string[previousLineBreak + 1] !== ' ');
-          previousLineBreak = i;
-        }
-      } else if (!isPrintable(char)) {
-        return STYLE_DOUBLE;
-      }
-      plain = plain && isPlainSafe(char, prevChar, inblock);
-      prevChar = char;
-    }
-    // in case the end is missing a \n
-    hasFoldableLine = hasFoldableLine || (shouldTrackWidth &&
-      (i - previousLineBreak - 1 > lineWidth &&
-       string[previousLineBreak + 1] !== ' '));
-  }
-  // Although every style can represent \n without escaping, prefer block styles
-  // for multiline, since they're more readable and they don't add empty lines.
-  // Also prefer folding a super-long line.
-  if (!hasLineBreak && !hasFoldableLine) {
-    // Strings interpretable as another type have to be quoted;
-    // e.g. the string 'true' vs. the boolean true.
-    if (plain && !forceQuotes && !testAmbiguousType(string)) {
-      return STYLE_PLAIN;
-    }
-    return quotingType === QUOTING_TYPE_DOUBLE ? STYLE_DOUBLE : STYLE_SINGLE;
-  }
-  // Edge case: block indentation indicator can only have one digit.
-  if (indentPerLevel > 9 && needIndentIndicator(string)) {
-    return STYLE_DOUBLE;
-  }
-  // At this point we know block styles are valid.
-  // Prefer literal style unless we want to fold.
-  if (!forceQuotes) {
-    return hasFoldableLine ? STYLE_FOLDED : STYLE_LITERAL;
-  }
-  return quotingType === QUOTING_TYPE_DOUBLE ? STYLE_DOUBLE : STYLE_SINGLE;
-}
-
-// Note: line breaking/folding is implemented for only the folded style.
-// NB. We drop the last trailing newline (if any) of a returned block scalar
-//  since the dumper adds its own newline. This always works:
-//    • No ending newline => unaffected; already using strip "-" chomping.
-//    • Ending newline    => removed then restored.
-//  Importantly, this keeps the "+" chomp indicator from gaining an extra line.
-function writeScalar(state, string, level, iskey, inblock) {
-  state.dump = (function () {
-    if (string.length === 0) {
-      return state.quotingType === QUOTING_TYPE_DOUBLE ? '""' : "''";
-    }
-    if (!state.noCompatMode) {
-      if (DEPRECATED_BOOLEANS_SYNTAX.indexOf(string) !== -1 || DEPRECATED_BASE60_SYNTAX.test(string)) {
-        return state.quotingType === QUOTING_TYPE_DOUBLE ? ('"' + string + '"') : ("'" + string + "'");
-      }
-    }
-
-    var indent = state.indent * Math.max(1, level); // no 0-indent scalars
-    // As indentation gets deeper, let the width decrease monotonically
-    // to the lower bound min(state.lineWidth, 40).
-    // Note that this implies
-    //  state.lineWidth ≤ 40 + state.indent: width is fixed at the lower bound.
-    //  state.lineWidth > 40 + state.indent: width decreases until the lower bound.
-    // This behaves better than a constant minimum width which disallows narrower options,
-    // or an indent threshold which causes the width to suddenly increase.
-    var lineWidth = state.lineWidth === -1
-      ? -1 : Math.max(Math.min(state.lineWidth, 40), state.lineWidth - indent);
-
-    // Without knowing if keys are implicit/explicit, assume implicit for safety.
-    var singleLineOnly = iskey
-      // No block styles in flow mode.
-      || (state.flowLevel > -1 && level >= state.flowLevel);
-    function testAmbiguity(string) {
-      return testImplicitResolving(state, string);
-    }
-
-    switch (chooseScalarStyle(string, singleLineOnly, state.indent, lineWidth,
-      testAmbiguity, state.quotingType, state.forceQuotes && !iskey, inblock)) {
-
-      case STYLE_PLAIN:
-        return string;
-      case STYLE_SINGLE:
-        return "'" + string.replace(/'/g, "''") + "'";
-      case STYLE_LITERAL:
-        return '|' + blockHeader(string, state.indent)
-          + dropEndingNewline(indentString(string, indent));
-      case STYLE_FOLDED:
-        return '>' + blockHeader(string, state.indent)
-          + dropEndingNewline(indentString(foldString(string, lineWidth), indent));
-      case STYLE_DOUBLE:
-        return '"' + escapeString(string, lineWidth) + '"';
-      default:
-        throw new YAMLException('impossible error: invalid scalar style');
-    }
-  }());
-}
-
-// Pre-conditions: string is valid for a block scalar, 1 <= indentPerLevel <= 9.
-function blockHeader(string, indentPerLevel) {
-  var indentIndicator = needIndentIndicator(string) ? String(indentPerLevel) : '';
-
-  // note the special case: the string '\n' counts as a "trailing" empty line.
-  var clip =          string[string.length - 1] === '\n';
-  var keep = clip && (string[string.length - 2] === '\n' || string === '\n');
-  var chomp = keep ? '+' : (clip ? '' : '-');
-
-  return indentIndicator + chomp + '\n';
-}
-
-// (See the note for writeScalar.)
-function dropEndingNewline(string) {
-  return string[string.length - 1] === '\n' ? string.slice(0, -1) : string;
-}
-
-// Note: a long line without a suitable break point will exceed the width limit.
-// Pre-conditions: every char in str isPrintable, str.length > 0, width > 0.
-function foldString(string, width) {
-  // In folded style, $k$ consecutive newlines output as $k+1$ newlines—
-  // unless they're before or after a more-indented line, or at the very
-  // beginning or end, in which case $k$ maps to $k$.
-  // Therefore, parse each chunk as newline(s) followed by a content line.
-  var lineRe = /(\n+)([^\n]*)/g;
-
-  // first line (possibly an empty line)
-  var result = (function () {
-    var nextLF = string.indexOf('\n');
-    nextLF = nextLF !== -1 ? nextLF : string.length;
-    lineRe.lastIndex = nextLF;
-    return foldLine(string.slice(0, nextLF), width);
-  }());
-  // If we haven't reached the first content line yet, don't add an extra \n.
-  var prevMoreIndented = string[0] === '\n' || string[0] === ' ';
-  var moreIndented;
-
-  // rest of the lines
-  var match;
-  while ((match = lineRe.exec(string))) {
-    var prefix = match[1], line = match[2];
-    moreIndented = (line[0] === ' ');
-    result += prefix
-      + (!prevMoreIndented && !moreIndented && line !== ''
-        ? '\n' : '')
-      + foldLine(line, width);
-    prevMoreIndented = moreIndented;
-  }
-
-  return result;
-}
-
-// Greedy line breaking.
-// Picks the longest line under the limit each time,
-// otherwise settles for the shortest line over the limit.
-// NB. More-indented lines *cannot* be folded, as that would add an extra \n.
-function foldLine(line, width) {
-  if (line === '' || line[0] === ' ') return line;
-
-  // Since a more-indented line adds a \n, breaks can't be followed by a space.
-  var breakRe = / [^ ]/g; // note: the match index will always be <= length-2.
-  var match;
-  // start is an inclusive index. end, curr, and next are exclusive.
-  var start = 0, end, curr = 0, next = 0;
-  var result = '';
-
-  // Invariants: 0 <= start <= length-1.
-  //   0 <= curr <= next <= max(0, length-2). curr - start <= width.
-  // Inside the loop:
-  //   A match implies length >= 2, so curr and next are <= length-2.
-  while ((match = breakRe.exec(line))) {
-    next = match.index;
-    // maintain invariant: curr - start <= width
-    if (next - start > width) {
-      end = (curr > start) ? curr : next; // derive end <= length-2
-      result += '\n' + line.slice(start, end);
-      // skip the space that was output as \n
-      start = end + 1;                    // derive start <= length-1
-    }
-    curr = next;
-  }
-
-  // By the invariants, start <= length-1, so there is something left over.
-  // It is either the whole string or a part starting from non-whitespace.
-  result += '\n';
-  // Insert a break if the remainder is too long and there is a break available.
-  if (line.length - start > width && curr > start) {
-    result += line.slice(start, curr) + '\n' + line.slice(curr + 1);
-  } else {
-    result += line.slice(start);
-  }
-
-  return result.slice(1); // drop extra \n joiner
-}
-
-// Escapes a double-quoted string.
-function escapeString(string) {
-  var result = '';
-  var char = 0;
-  var escapeSeq;
-
-  for (var i = 0; i < string.length; char >= 0x10000 ? i += 2 : i++) {
-    char = codePointAt(string, i);
-    escapeSeq = ESCAPE_SEQUENCES[char];
-
-    if (!escapeSeq && isPrintable(char)) {
-      result += string[i];
-      if (char >= 0x10000) result += string[i + 1];
-    } else {
-      result += escapeSeq || encodeHex(char);
-    }
-  }
-
-  return result;
-}
-
-function writeFlowSequence(state, level, object) {
-  var _result = '',
-      _tag    = state.tag,
-      index,
-      length,
-      value;
-
-  for (index = 0, length = object.length; index < length; index += 1) {
-    value = object[index];
-
-    if (state.replacer) {
-      value = state.replacer.call(object, String(index), value);
-    }
-
-    // Write only valid elements, put null instead of invalid elements.
-    if (writeNode(state, level, value, false, false) ||
-        (typeof value === 'undefined' &&
-         writeNode(state, level, null, false, false))) {
-
-      if (_result !== '') _result += ',' + (!state.condenseFlow ? ' ' : '');
-      _result += state.dump;
-    }
-  }
-
-  state.tag = _tag;
-  state.dump = '[' + _result + ']';
-}
-
-function writeBlockSequence(state, level, object, compact) {
-  var _result = '',
-      _tag    = state.tag,
-      index,
-      length,
-      value;
-
-  for (index = 0, length = object.length; index < length; index += 1) {
-    value = object[index];
-
-    if (state.replacer) {
-      value = state.replacer.call(object, String(index), value);
-    }
-
-    // Write only valid elements, put null instead of invalid elements.
-    if (writeNode(state, level + 1, value, true, true, false, true) ||
-        (typeof value === 'undefined' &&
-         writeNode(state, level + 1, null, true, true, false, true))) {
-
-      if (!compact || _result !== '') {
-        _result += generateNextLine(state, level);
-      }
-
-      if (state.dump && CHAR_LINE_FEED === state.dump.charCodeAt(0)) {
-        _result += '-';
-      } else {
-        _result += '- ';
-      }
-
-      _result += state.dump;
-    }
-  }
-
-  state.tag = _tag;
-  state.dump = _result || '[]'; // Empty sequence if no valid values.
-}
-
-function writeFlowMapping(state, level, object) {
-  var _result       = '',
-      _tag          = state.tag,
-      objectKeyList = Object.keys(object),
-      index,
-      length,
-      objectKey,
-      objectValue,
-      pairBuffer;
-
-  for (index = 0, length = objectKeyList.length; index < length; index += 1) {
-
-    pairBuffer = '';
-    if (_result !== '') pairBuffer += ', ';
-
-    if (state.condenseFlow) pairBuffer += '"';
-
-    objectKey = objectKeyList[index];
-    objectValue = object[objectKey];
-
-    if (state.replacer) {
-      objectValue = state.replacer.call(object, objectKey, objectValue);
-    }
-
-    if (!writeNode(state, level, objectKey, false, false)) {
-      continue; // Skip this pair because of invalid key;
-    }
-
-    if (state.dump.length > 1024) pairBuffer += '? ';
-
-    pairBuffer += state.dump + (state.condenseFlow ? '"' : '') + ':' + (state.condenseFlow ? '' : ' ');
-
-    if (!writeNode(state, level, objectValue, false, false)) {
-      continue; // Skip this pair because of invalid value.
-    }
-
-    pairBuffer += state.dump;
-
-    // Both key and value are valid.
-    _result += pairBuffer;
-  }
-
-  state.tag = _tag;
-  state.dump = '{' + _result + '}';
-}
-
-function writeBlockMapping(state, level, object, compact) {
-  var _result       = '',
-      _tag          = state.tag,
-      objectKeyList = Object.keys(object),
-      index,
-      length,
-      objectKey,
-      objectValue,
-      explicitPair,
-      pairBuffer;
-
-  // Allow sorting keys so that the output file is deterministic
-  if (state.sortKeys === true) {
-    // Default sorting
-    objectKeyList.sort();
-  } else if (typeof state.sortKeys === 'function') {
-    // Custom sort function
-    objectKeyList.sort(state.sortKeys);
-  } else if (state.sortKeys) {
-    // Something is wrong
-    throw new YAMLException('sortKeys must be a boolean or a function');
-  }
-
-  for (index = 0, length = objectKeyList.length; index < length; index += 1) {
-    pairBuffer = '';
-
-    if (!compact || _result !== '') {
-      pairBuffer += generateNextLine(state, level);
-    }
-
-    objectKey = objectKeyList[index];
-    objectValue = object[objectKey];
-
-    if (state.replacer) {
-      objectValue = state.replacer.call(object, objectKey, objectValue);
-    }
-
-    if (!writeNode(state, level + 1, objectKey, true, true, true)) {
-      continue; // Skip this pair because of invalid key.
-    }
-
-    explicitPair = (state.tag !== null && state.tag !== '?') ||
-                   (state.dump && state.dump.length > 1024);
-
-    if (explicitPair) {
-      if (state.dump && CHAR_LINE_FEED === state.dump.charCodeAt(0)) {
-        pairBuffer += '?';
-      } else {
-        pairBuffer += '? ';
-      }
-    }
-
-    pairBuffer += state.dump;
-
-    if (explicitPair) {
-      pairBuffer += generateNextLine(state, level);
-    }
-
-    if (!writeNode(state, level + 1, objectValue, true, explicitPair)) {
-      continue; // Skip this pair because of invalid value.
-    }
-
-    if (state.dump && CHAR_LINE_FEED === state.dump.charCodeAt(0)) {
-      pairBuffer += ':';
-    } else {
-      pairBuffer += ': ';
-    }
-
-    pairBuffer += state.dump;
-
-    // Both key and value are valid.
-    _result += pairBuffer;
-  }
-
-  state.tag = _tag;
-  state.dump = _result || '{}'; // Empty mapping if no valid pairs.
-}
-
-function detectType(state, object, explicit) {
-  var _result, typeList, index, length, type, style;
-
-  typeList = explicit ? state.explicitTypes : state.implicitTypes;
-
-  for (index = 0, length = typeList.length; index < length; index += 1) {
-    type = typeList[index];
-
-    if ((type.instanceOf  || type.predicate) &&
-        (!type.instanceOf || ((typeof object === 'object') && (object instanceof type.instanceOf))) &&
-        (!type.predicate  || type.predicate(object))) {
-
-      if (explicit) {
-        if (type.multi && type.representName) {
-          state.tag = type.representName(object);
-        } else {
-          state.tag = type.tag;
-        }
-      } else {
-        state.tag = '?';
-      }
-
-      if (type.represent) {
-        style = state.styleMap[type.tag] || type.defaultStyle;
-
-        if (_toString.call(type.represent) === '[object Function]') {
-          _result = type.represent(object, style);
-        } else if (_hasOwnProperty.call(type.represent, style)) {
-          _result = type.represent[style](object, style);
-        } else {
-          throw new YAMLException('!<' + type.tag + '> tag resolver accepts not "' + style + '" style');
-        }
-
-        state.dump = _result;
-      }
-
-      return true;
-    }
-  }
-
-  return false;
-}
-
-// Serializes `object` and writes it to global `result`.
-// Returns true on success, or false on invalid object.
-//
-function writeNode(state, level, object, block, compact, iskey, isblockseq) {
-  state.tag = null;
-  state.dump = object;
-
-  if (!detectType(state, object, false)) {
-    detectType(state, object, true);
-  }
-
-  var type = _toString.call(state.dump);
-  var inblock = block;
-  var tagStr;
-
-  if (block) {
-    block = (state.flowLevel < 0 || state.flowLevel > level);
-  }
-
-  var objectOrArray = type === '[object Object]' || type === '[object Array]',
-      duplicateIndex,
-      duplicate;
-
-  if (objectOrArray) {
-    duplicateIndex = state.duplicates.indexOf(object);
-    duplicate = duplicateIndex !== -1;
-  }
-
-  if ((state.tag !== null && state.tag !== '?') || duplicate || (state.indent !== 2 && level > 0)) {
-    compact = false;
-  }
-
-  if (duplicate && state.usedDuplicates[duplicateIndex]) {
-    state.dump = '*ref_' + duplicateIndex;
-  } else {
-    if (objectOrArray && duplicate && !state.usedDuplicates[duplicateIndex]) {
-      state.usedDuplicates[duplicateIndex] = true;
-    }
-    if (type === '[object Object]') {
-      if (block && (Object.keys(state.dump).length !== 0)) {
-        writeBlockMapping(state, level, state.dump, compact);
-        if (duplicate) {
-          state.dump = '&ref_' + duplicateIndex + state.dump;
-        }
-      } else {
-        writeFlowMapping(state, level, state.dump);
-        if (duplicate) {
-          state.dump = '&ref_' + duplicateIndex + ' ' + state.dump;
-        }
-      }
-    } else if (type === '[object Array]') {
-      if (block && (state.dump.length !== 0)) {
-        if (state.noArrayIndent && !isblockseq && level > 0) {
-          writeBlockSequence(state, level - 1, state.dump, compact);
-        } else {
-          writeBlockSequence(state, level, state.dump, compact);
-        }
-        if (duplicate) {
-          state.dump = '&ref_' + duplicateIndex + state.dump;
-        }
-      } else {
-        writeFlowSequence(state, level, state.dump);
-        if (duplicate) {
-          state.dump = '&ref_' + duplicateIndex + ' ' + state.dump;
-        }
-      }
-    } else if (type === '[object String]') {
-      if (state.tag !== '?') {
-        writeScalar(state, state.dump, level, iskey, inblock);
-      }
-    } else if (type === '[object Undefined]') {
-      return false;
-    } else {
-      if (state.skipInvalid) return false;
-      throw new YAMLException('unacceptable kind of an object to dump ' + type);
-    }
-
-    if (state.tag !== null && state.tag !== '?') {
-      // Need to encode all characters except those allowed by the spec:
-      //
-      // [35] ns-dec-digit    ::=  [#x30-#x39] /* 0-9 */
-      // [36] ns-hex-digit    ::=  ns-dec-digit
-      //                         | [#x41-#x46] /* A-F */ | [#x61-#x66] /* a-f */
-      // [37] ns-ascii-letter ::=  [#x41-#x5A] /* A-Z */ | [#x61-#x7A] /* a-z */
-      // [38] ns-word-char    ::=  ns-dec-digit | ns-ascii-letter | “-”
-      // [39] ns-uri-char     ::=  “%” ns-hex-digit ns-hex-digit | ns-word-char | “#”
-      //                         | “;” | “/” | “?” | “:” | “@” | “&” | “=” | “+” | “$” | “,”
-      //                         | “_” | “.” | “!” | “~” | “*” | “'” | “(” | “)” | “[” | “]”
-      //
-      // Also need to encode '!' because it has special meaning (end of tag prefix).
-      //
-      tagStr = encodeURI(
-        state.tag[0] === '!' ? state.tag.slice(1) : state.tag
-      ).replace(/!/g, '%21');
-
-      if (state.tag[0] === '!') {
-        tagStr = '!' + tagStr;
-      } else if (tagStr.slice(0, 18) === 'tag:yaml.org,2002:') {
-        tagStr = '!!' + tagStr.slice(18);
-      } else {
-        tagStr = '!<' + tagStr + '>';
-      }
-
-      state.dump = tagStr + ' ' + state.dump;
-    }
-  }
-
-  return true;
-}
-
-function getDuplicateReferences(object, state) {
-  var objects = [],
-      duplicatesIndexes = [],
-      index,
-      length;
-
-  inspectNode(object, objects, duplicatesIndexes);
-
-  for (index = 0, length = duplicatesIndexes.length; index < length; index += 1) {
-    state.duplicates.push(objects[duplicatesIndexes[index]]);
-  }
-  state.usedDuplicates = new Array(length);
-}
-
-function inspectNode(object, objects, duplicatesIndexes) {
-  var objectKeyList,
-      index,
-      length;
-
-  if (object !== null && typeof object === 'object') {
-    index = objects.indexOf(object);
-    if (index !== -1) {
-      if (duplicatesIndexes.indexOf(index) === -1) {
-        duplicatesIndexes.push(index);
-      }
-    } else {
-      objects.push(object);
-
-      if (Array.isArray(object)) {
-        for (index = 0, length = object.length; index < length; index += 1) {
-          inspectNode(object[index], objects, duplicatesIndexes);
-        }
-      } else {
-        objectKeyList = Object.keys(object);
-
-        for (index = 0, length = objectKeyList.length; index < length; index += 1) {
-          inspectNode(object[objectKeyList[index]], objects, duplicatesIndexes);
-        }
-      }
-    }
-  }
-}
-
-function dump(input, options) {
-  options = options || {};
-
-  var state = new State(options);
-
-  if (!state.noRefs) getDuplicateReferences(input, state);
-
-  var value = input;
-
-  if (state.replacer) {
-    value = state.replacer.call({ '': value }, '', value);
-  }
-
-  if (writeNode(state, 0, value, true, true)) return state.dump + '\n';
-
-  return '';
-}
-
-module.exports.dump = dump;
-
-
-/***/ }),
-
-/***/ 8179:
-/***/ ((module) => {
-
-"use strict";
-// YAML error class. http://stackoverflow.com/questions/8458984
-//
-
-
-
-function formatError(exception, compact) {
-  var where = '', message = exception.reason || '(unknown reason)';
-
-  if (!exception.mark) return message;
-
-  if (exception.mark.name) {
-    where += 'in "' + exception.mark.name + '" ';
-  }
-
-  where += '(' + (exception.mark.line + 1) + ':' + (exception.mark.column + 1) + ')';
-
-  if (!compact && exception.mark.snippet) {
-    where += '\n\n' + exception.mark.snippet;
-  }
-
-  return message + ' ' + where;
-}
-
-
-function YAMLException(reason, mark) {
-  // Super constructor
-  Error.call(this);
-
-  this.name = 'YAMLException';
-  this.reason = reason;
-  this.mark = mark;
-  this.message = formatError(this, false);
-
-  // Include stack trace in error object
-  if (Error.captureStackTrace) {
-    // Chrome and NodeJS
-    Error.captureStackTrace(this, this.constructor);
-  } else {
-    // FF, IE 10+ and Safari 6+. Fallback for others
-    this.stack = (new Error()).stack || '';
-  }
-}
-
-
-// Inherit from Error
-YAMLException.prototype = Object.create(Error.prototype);
-YAMLException.prototype.constructor = YAMLException;
-
-
-YAMLException.prototype.toString = function toString(compact) {
-  return this.name + ': ' + formatError(this, compact);
-};
-
-
-module.exports = YAMLException;
-
-
-/***/ }),
-
-/***/ 1161:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-/*eslint-disable max-len,no-use-before-define*/
-
-var common              = __nccwpck_require__(6829);
-var YAMLException       = __nccwpck_require__(8179);
-var makeSnippet         = __nccwpck_require__(6975);
-var DEFAULT_SCHEMA      = __nccwpck_require__(8759);
-
-
-var _hasOwnProperty = Object.prototype.hasOwnProperty;
-
-
-var CONTEXT_FLOW_IN   = 1;
-var CONTEXT_FLOW_OUT  = 2;
-var CONTEXT_BLOCK_IN  = 3;
-var CONTEXT_BLOCK_OUT = 4;
-
-
-var CHOMPING_CLIP  = 1;
-var CHOMPING_STRIP = 2;
-var CHOMPING_KEEP  = 3;
-
-
-var PATTERN_NON_PRINTABLE         = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/;
-var PATTERN_NON_ASCII_LINE_BREAKS = /[\x85\u2028\u2029]/;
-var PATTERN_FLOW_INDICATORS       = /[,\[\]\{\}]/;
-var PATTERN_TAG_HANDLE            = /^(?:!|!!|![a-z\-]+!)$/i;
-var PATTERN_TAG_URI               = /^(?:!|[^,\[\]\{\}])(?:%[0-9a-f]{2}|[0-9a-z\-#;\/\?:@&=\+\$,_\.!~\*'\(\)\[\]])*$/i;
-
-
-function _class(obj) { return Object.prototype.toString.call(obj); }
-
-function is_EOL(c) {
-  return (c === 0x0A/* LF */) || (c === 0x0D/* CR */);
-}
-
-function is_WHITE_SPACE(c) {
-  return (c === 0x09/* Tab */) || (c === 0x20/* Space */);
-}
-
-function is_WS_OR_EOL(c) {
-  return (c === 0x09/* Tab */) ||
-         (c === 0x20/* Space */) ||
-         (c === 0x0A/* LF */) ||
-         (c === 0x0D/* CR */);
-}
-
-function is_FLOW_INDICATOR(c) {
-  return c === 0x2C/* , */ ||
-         c === 0x5B/* [ */ ||
-         c === 0x5D/* ] */ ||
-         c === 0x7B/* { */ ||
-         c === 0x7D/* } */;
-}
-
-function fromHexCode(c) {
-  var lc;
-
-  if ((0x30/* 0 */ <= c) && (c <= 0x39/* 9 */)) {
-    return c - 0x30;
-  }
-
-  /*eslint-disable no-bitwise*/
-  lc = c | 0x20;
-
-  if ((0x61/* a */ <= lc) && (lc <= 0x66/* f */)) {
-    return lc - 0x61 + 10;
-  }
-
-  return -1;
-}
-
-function escapedHexLen(c) {
-  if (c === 0x78/* x */) { return 2; }
-  if (c === 0x75/* u */) { return 4; }
-  if (c === 0x55/* U */) { return 8; }
-  return 0;
-}
-
-function fromDecimalCode(c) {
-  if ((0x30/* 0 */ <= c) && (c <= 0x39/* 9 */)) {
-    return c - 0x30;
-  }
-
-  return -1;
-}
-
-function simpleEscapeSequence(c) {
-  /* eslint-disable indent */
-  return (c === 0x30/* 0 */) ? '\x00' :
-        (c === 0x61/* a */) ? '\x07' :
-        (c === 0x62/* b */) ? '\x08' :
-        (c === 0x74/* t */) ? '\x09' :
-        (c === 0x09/* Tab */) ? '\x09' :
-        (c === 0x6E/* n */) ? '\x0A' :
-        (c === 0x76/* v */) ? '\x0B' :
-        (c === 0x66/* f */) ? '\x0C' :
-        (c === 0x72/* r */) ? '\x0D' :
-        (c === 0x65/* e */) ? '\x1B' :
-        (c === 0x20/* Space */) ? ' ' :
-        (c === 0x22/* " */) ? '\x22' :
-        (c === 0x2F/* / */) ? '/' :
-        (c === 0x5C/* \ */) ? '\x5C' :
-        (c === 0x4E/* N */) ? '\x85' :
-        (c === 0x5F/* _ */) ? '\xA0' :
-        (c === 0x4C/* L */) ? '\u2028' :
-        (c === 0x50/* P */) ? '\u2029' : '';
-}
-
-function charFromCodepoint(c) {
-  if (c <= 0xFFFF) {
-    return String.fromCharCode(c);
-  }
-  // Encode UTF-16 surrogate pair
-  // https://en.wikipedia.org/wiki/UTF-16#Code_points_U.2B010000_to_U.2B10FFFF
-  return String.fromCharCode(
-    ((c - 0x010000) >> 10) + 0xD800,
-    ((c - 0x010000) & 0x03FF) + 0xDC00
-  );
-}
-
-var simpleEscapeCheck = new Array(256); // integer, for fast access
-var simpleEscapeMap = new Array(256);
-for (var i = 0; i < 256; i++) {
-  simpleEscapeCheck[i] = simpleEscapeSequence(i) ? 1 : 0;
-  simpleEscapeMap[i] = simpleEscapeSequence(i);
-}
-
-
-function State(input, options) {
-  this.input = input;
-
-  this.filename  = options['filename']  || null;
-  this.schema    = options['schema']    || DEFAULT_SCHEMA;
-  this.onWarning = options['onWarning'] || null;
-  // (Hidden) Remove? makes the loader to expect YAML 1.1 documents
-  // if such documents have no explicit %YAML directive
-  this.legacy    = options['legacy']    || false;
-
-  this.json      = options['json']      || false;
-  this.listener  = options['listener']  || null;
-
-  this.implicitTypes = this.schema.compiledImplicit;
-  this.typeMap       = this.schema.compiledTypeMap;
-
-  this.length     = input.length;
-  this.position   = 0;
-  this.line       = 0;
-  this.lineStart  = 0;
-  this.lineIndent = 0;
-
-  // position of first leading tab in the current line,
-  // used to make sure there are no tabs in the indentation
-  this.firstTabInLine = -1;
-
-  this.documents = [];
-
-  /*
-  this.version;
-  this.checkLineBreaks;
-  this.tagMap;
-  this.anchorMap;
-  this.tag;
-  this.anchor;
-  this.kind;
-  this.result;*/
-
-}
-
-
-function generateError(state, message) {
-  var mark = {
-    name:     state.filename,
-    buffer:   state.input.slice(0, -1), // omit trailing \0
-    position: state.position,
-    line:     state.line,
-    column:   state.position - state.lineStart
-  };
-
-  mark.snippet = makeSnippet(mark);
-
-  return new YAMLException(message, mark);
-}
-
-function throwError(state, message) {
-  throw generateError(state, message);
-}
-
-function throwWarning(state, message) {
-  if (state.onWarning) {
-    state.onWarning.call(null, generateError(state, message));
-  }
-}
-
-
-var directiveHandlers = {
-
-  YAML: function handleYamlDirective(state, name, args) {
-
-    var match, major, minor;
-
-    if (state.version !== null) {
-      throwError(state, 'duplication of %YAML directive');
-    }
-
-    if (args.length !== 1) {
-      throwError(state, 'YAML directive accepts exactly one argument');
-    }
-
-    match = /^([0-9]+)\.([0-9]+)$/.exec(args[0]);
-
-    if (match === null) {
-      throwError(state, 'ill-formed argument of the YAML directive');
-    }
-
-    major = parseInt(match[1], 10);
-    minor = parseInt(match[2], 10);
-
-    if (major !== 1) {
-      throwError(state, 'unacceptable YAML version of the document');
-    }
-
-    state.version = args[0];
-    state.checkLineBreaks = (minor < 2);
-
-    if (minor !== 1 && minor !== 2) {
-      throwWarning(state, 'unsupported YAML version of the document');
-    }
-  },
-
-  TAG: function handleTagDirective(state, name, args) {
-
-    var handle, prefix;
-
-    if (args.length !== 2) {
-      throwError(state, 'TAG directive accepts exactly two arguments');
-    }
-
-    handle = args[0];
-    prefix = args[1];
-
-    if (!PATTERN_TAG_HANDLE.test(handle)) {
-      throwError(state, 'ill-formed tag handle (first argument) of the TAG directive');
-    }
-
-    if (_hasOwnProperty.call(state.tagMap, handle)) {
-      throwError(state, 'there is a previously declared suffix for "' + handle + '" tag handle');
-    }
-
-    if (!PATTERN_TAG_URI.test(prefix)) {
-      throwError(state, 'ill-formed tag prefix (second argument) of the TAG directive');
-    }
-
-    try {
-      prefix = decodeURIComponent(prefix);
-    } catch (err) {
-      throwError(state, 'tag prefix is malformed: ' + prefix);
-    }
-
-    state.tagMap[handle] = prefix;
-  }
-};
-
-
-function captureSegment(state, start, end, checkJson) {
-  var _position, _length, _character, _result;
-
-  if (start < end) {
-    _result = state.input.slice(start, end);
-
-    if (checkJson) {
-      for (_position = 0, _length = _result.length; _position < _length; _position += 1) {
-        _character = _result.charCodeAt(_position);
-        if (!(_character === 0x09 ||
-              (0x20 <= _character && _character <= 0x10FFFF))) {
-          throwError(state, 'expected valid JSON character');
-        }
-      }
-    } else if (PATTERN_NON_PRINTABLE.test(_result)) {
-      throwError(state, 'the stream contains non-printable characters');
-    }
-
-    state.result += _result;
-  }
-}
-
-function mergeMappings(state, destination, source, overridableKeys) {
-  var sourceKeys, key, index, quantity;
-
-  if (!common.isObject(source)) {
-    throwError(state, 'cannot merge mappings; the provided source object is unacceptable');
-  }
-
-  sourceKeys = Object.keys(source);
-
-  for (index = 0, quantity = sourceKeys.length; index < quantity; index += 1) {
-    key = sourceKeys[index];
-
-    if (!_hasOwnProperty.call(destination, key)) {
-      destination[key] = source[key];
-      overridableKeys[key] = true;
-    }
-  }
-}
-
-function storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, valueNode,
-  startLine, startLineStart, startPos) {
-
-  var index, quantity;
-
-  // The output is a plain object here, so keys can only be strings.
-  // We need to convert keyNode to a string, but doing so can hang the process
-  // (deeply nested arrays that explode exponentially using aliases).
-  if (Array.isArray(keyNode)) {
-    keyNode = Array.prototype.slice.call(keyNode);
-
-    for (index = 0, quantity = keyNode.length; index < quantity; index += 1) {
-      if (Array.isArray(keyNode[index])) {
-        throwError(state, 'nested arrays are not supported inside keys');
-      }
-
-      if (typeof keyNode === 'object' && _class(keyNode[index]) === '[object Object]') {
-        keyNode[index] = '[object Object]';
-      }
-    }
-  }
-
-  // Avoid code execution in load() via toString property
-  // (still use its own toString for arrays, timestamps,
-  // and whatever user schema extensions happen to have @@toStringTag)
-  if (typeof keyNode === 'object' && _class(keyNode) === '[object Object]') {
-    keyNode = '[object Object]';
-  }
-
-
-  keyNode = String(keyNode);
-
-  if (_result === null) {
-    _result = {};
-  }
-
-  if (keyTag === 'tag:yaml.org,2002:merge') {
-    if (Array.isArray(valueNode)) {
-      for (index = 0, quantity = valueNode.length; index < quantity; index += 1) {
-        mergeMappings(state, _result, valueNode[index], overridableKeys);
-      }
-    } else {
-      mergeMappings(state, _result, valueNode, overridableKeys);
-    }
-  } else {
-    if (!state.json &&
-        !_hasOwnProperty.call(overridableKeys, keyNode) &&
-        _hasOwnProperty.call(_result, keyNode)) {
-      state.line = startLine || state.line;
-      state.lineStart = startLineStart || state.lineStart;
-      state.position = startPos || state.position;
-      throwError(state, 'duplicated mapping key');
-    }
-
-    // used for this specific key only because Object.defineProperty is slow
-    if (keyNode === '__proto__') {
-      Object.defineProperty(_result, keyNode, {
-        configurable: true,
-        enumerable: true,
-        writable: true,
-        value: valueNode
-      });
-    } else {
-      _result[keyNode] = valueNode;
-    }
-    delete overridableKeys[keyNode];
-  }
-
-  return _result;
-}
-
-function readLineBreak(state) {
-  var ch;
-
-  ch = state.input.charCodeAt(state.position);
-
-  if (ch === 0x0A/* LF */) {
-    state.position++;
-  } else if (ch === 0x0D/* CR */) {
-    state.position++;
-    if (state.input.charCodeAt(state.position) === 0x0A/* LF */) {
-      state.position++;
-    }
-  } else {
-    throwError(state, 'a line break is expected');
-  }
-
-  state.line += 1;
-  state.lineStart = state.position;
-  state.firstTabInLine = -1;
-}
-
-function skipSeparationSpace(state, allowComments, checkIndent) {
-  var lineBreaks = 0,
-      ch = state.input.charCodeAt(state.position);
-
-  while (ch !== 0) {
-    while (is_WHITE_SPACE(ch)) {
-      if (ch === 0x09/* Tab */ && state.firstTabInLine === -1) {
-        state.firstTabInLine = state.position;
-      }
-      ch = state.input.charCodeAt(++state.position);
-    }
-
-    if (allowComments && ch === 0x23/* # */) {
-      do {
-        ch = state.input.charCodeAt(++state.position);
-      } while (ch !== 0x0A/* LF */ && ch !== 0x0D/* CR */ && ch !== 0);
-    }
-
-    if (is_EOL(ch)) {
-      readLineBreak(state);
-
-      ch = state.input.charCodeAt(state.position);
-      lineBreaks++;
-      state.lineIndent = 0;
-
-      while (ch === 0x20/* Space */) {
-        state.lineIndent++;
-        ch = state.input.charCodeAt(++state.position);
-      }
-    } else {
-      break;
-    }
-  }
-
-  if (checkIndent !== -1 && lineBreaks !== 0 && state.lineIndent < checkIndent) {
-    throwWarning(state, 'deficient indentation');
-  }
-
-  return lineBreaks;
-}
-
-function testDocumentSeparator(state) {
-  var _position = state.position,
-      ch;
-
-  ch = state.input.charCodeAt(_position);
-
-  // Condition state.position === state.lineStart is tested
-  // in parent on each call, for efficiency. No needs to test here again.
-  if ((ch === 0x2D/* - */ || ch === 0x2E/* . */) &&
-      ch === state.input.charCodeAt(_position + 1) &&
-      ch === state.input.charCodeAt(_position + 2)) {
-
-    _position += 3;
-
-    ch = state.input.charCodeAt(_position);
-
-    if (ch === 0 || is_WS_OR_EOL(ch)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function writeFoldedLines(state, count) {
-  if (count === 1) {
-    state.result += ' ';
-  } else if (count > 1) {
-    state.result += common.repeat('\n', count - 1);
-  }
-}
-
-
-function readPlainScalar(state, nodeIndent, withinFlowCollection) {
-  var preceding,
-      following,
-      captureStart,
-      captureEnd,
-      hasPendingContent,
-      _line,
-      _lineStart,
-      _lineIndent,
-      _kind = state.kind,
-      _result = state.result,
-      ch;
-
-  ch = state.input.charCodeAt(state.position);
-
-  if (is_WS_OR_EOL(ch)      ||
-      is_FLOW_INDICATOR(ch) ||
-      ch === 0x23/* # */    ||
-      ch === 0x26/* & */    ||
-      ch === 0x2A/* * */    ||
-      ch === 0x21/* ! */    ||
-      ch === 0x7C/* | */    ||
-      ch === 0x3E/* > */    ||
-      ch === 0x27/* ' */    ||
-      ch === 0x22/* " */    ||
-      ch === 0x25/* % */    ||
-      ch === 0x40/* @ */    ||
-      ch === 0x60/* ` */) {
-    return false;
-  }
-
-  if (ch === 0x3F/* ? */ || ch === 0x2D/* - */) {
-    following = state.input.charCodeAt(state.position + 1);
-
-    if (is_WS_OR_EOL(following) ||
-        withinFlowCollection && is_FLOW_INDICATOR(following)) {
-      return false;
-    }
-  }
-
-  state.kind = 'scalar';
-  state.result = '';
-  captureStart = captureEnd = state.position;
-  hasPendingContent = false;
-
-  while (ch !== 0) {
-    if (ch === 0x3A/* : */) {
-      following = state.input.charCodeAt(state.position + 1);
-
-      if (is_WS_OR_EOL(following) ||
-          withinFlowCollection && is_FLOW_INDICATOR(following)) {
-        break;
-      }
-
-    } else if (ch === 0x23/* # */) {
-      preceding = state.input.charCodeAt(state.position - 1);
-
-      if (is_WS_OR_EOL(preceding)) {
-        break;
-      }
-
-    } else if ((state.position === state.lineStart && testDocumentSeparator(state)) ||
-               withinFlowCollection && is_FLOW_INDICATOR(ch)) {
-      break;
-
-    } else if (is_EOL(ch)) {
-      _line = state.line;
-      _lineStart = state.lineStart;
-      _lineIndent = state.lineIndent;
-      skipSeparationSpace(state, false, -1);
-
-      if (state.lineIndent >= nodeIndent) {
-        hasPendingContent = true;
-        ch = state.input.charCodeAt(state.position);
-        continue;
-      } else {
-        state.position = captureEnd;
-        state.line = _line;
-        state.lineStart = _lineStart;
-        state.lineIndent = _lineIndent;
-        break;
-      }
-    }
-
-    if (hasPendingContent) {
-      captureSegment(state, captureStart, captureEnd, false);
-      writeFoldedLines(state, state.line - _line);
-      captureStart = captureEnd = state.position;
-      hasPendingContent = false;
-    }
-
-    if (!is_WHITE_SPACE(ch)) {
-      captureEnd = state.position + 1;
-    }
-
-    ch = state.input.charCodeAt(++state.position);
-  }
-
-  captureSegment(state, captureStart, captureEnd, false);
-
-  if (state.result) {
-    return true;
-  }
-
-  state.kind = _kind;
-  state.result = _result;
-  return false;
-}
-
-function readSingleQuotedScalar(state, nodeIndent) {
-  var ch,
-      captureStart, captureEnd;
-
-  ch = state.input.charCodeAt(state.position);
-
-  if (ch !== 0x27/* ' */) {
-    return false;
-  }
-
-  state.kind = 'scalar';
-  state.result = '';
-  state.position++;
-  captureStart = captureEnd = state.position;
-
-  while ((ch = state.input.charCodeAt(state.position)) !== 0) {
-    if (ch === 0x27/* ' */) {
-      captureSegment(state, captureStart, state.position, true);
-      ch = state.input.charCodeAt(++state.position);
-
-      if (ch === 0x27/* ' */) {
-        captureStart = state.position;
-        state.position++;
-        captureEnd = state.position;
-      } else {
-        return true;
-      }
-
-    } else if (is_EOL(ch)) {
-      captureSegment(state, captureStart, captureEnd, true);
-      writeFoldedLines(state, skipSeparationSpace(state, false, nodeIndent));
-      captureStart = captureEnd = state.position;
-
-    } else if (state.position === state.lineStart && testDocumentSeparator(state)) {
-      throwError(state, 'unexpected end of the document within a single quoted scalar');
-
-    } else {
-      state.position++;
-      captureEnd = state.position;
-    }
-  }
-
-  throwError(state, 'unexpected end of the stream within a single quoted scalar');
-}
-
-function readDoubleQuotedScalar(state, nodeIndent) {
-  var captureStart,
-      captureEnd,
-      hexLength,
-      hexResult,
-      tmp,
-      ch;
-
-  ch = state.input.charCodeAt(state.position);
-
-  if (ch !== 0x22/* " */) {
-    return false;
-  }
-
-  state.kind = 'scalar';
-  state.result = '';
-  state.position++;
-  captureStart = captureEnd = state.position;
-
-  while ((ch = state.input.charCodeAt(state.position)) !== 0) {
-    if (ch === 0x22/* " */) {
-      captureSegment(state, captureStart, state.position, true);
-      state.position++;
-      return true;
-
-    } else if (ch === 0x5C/* \ */) {
-      captureSegment(state, captureStart, state.position, true);
-      ch = state.input.charCodeAt(++state.position);
-
-      if (is_EOL(ch)) {
-        skipSeparationSpace(state, false, nodeIndent);
-
-        // TODO: rework to inline fn with no type cast?
-      } else if (ch < 256 && simpleEscapeCheck[ch]) {
-        state.result += simpleEscapeMap[ch];
-        state.position++;
-
-      } else if ((tmp = escapedHexLen(ch)) > 0) {
-        hexLength = tmp;
-        hexResult = 0;
-
-        for (; hexLength > 0; hexLength--) {
-          ch = state.input.charCodeAt(++state.position);
-
-          if ((tmp = fromHexCode(ch)) >= 0) {
-            hexResult = (hexResult << 4) + tmp;
-
-          } else {
-            throwError(state, 'expected hexadecimal character');
-          }
-        }
-
-        state.result += charFromCodepoint(hexResult);
-
-        state.position++;
-
-      } else {
-        throwError(state, 'unknown escape sequence');
-      }
-
-      captureStart = captureEnd = state.position;
-
-    } else if (is_EOL(ch)) {
-      captureSegment(state, captureStart, captureEnd, true);
-      writeFoldedLines(state, skipSeparationSpace(state, false, nodeIndent));
-      captureStart = captureEnd = state.position;
-
-    } else if (state.position === state.lineStart && testDocumentSeparator(state)) {
-      throwError(state, 'unexpected end of the document within a double quoted scalar');
-
-    } else {
-      state.position++;
-      captureEnd = state.position;
-    }
-  }
-
-  throwError(state, 'unexpected end of the stream within a double quoted scalar');
-}
-
-function readFlowCollection(state, nodeIndent) {
-  var readNext = true,
-      _line,
-      _lineStart,
-      _pos,
-      _tag     = state.tag,
-      _result,
-      _anchor  = state.anchor,
-      following,
-      terminator,
-      isPair,
-      isExplicitPair,
-      isMapping,
-      overridableKeys = Object.create(null),
-      keyNode,
-      keyTag,
-      valueNode,
-      ch;
-
-  ch = state.input.charCodeAt(state.position);
-
-  if (ch === 0x5B/* [ */) {
-    terminator = 0x5D;/* ] */
-    isMapping = false;
-    _result = [];
-  } else if (ch === 0x7B/* { */) {
-    terminator = 0x7D;/* } */
-    isMapping = true;
-    _result = {};
-  } else {
-    return false;
-  }
-
-  if (state.anchor !== null) {
-    state.anchorMap[state.anchor] = _result;
-  }
-
-  ch = state.input.charCodeAt(++state.position);
-
-  while (ch !== 0) {
-    skipSeparationSpace(state, true, nodeIndent);
-
-    ch = state.input.charCodeAt(state.position);
-
-    if (ch === terminator) {
-      state.position++;
-      state.tag = _tag;
-      state.anchor = _anchor;
-      state.kind = isMapping ? 'mapping' : 'sequence';
-      state.result = _result;
-      return true;
-    } else if (!readNext) {
-      throwError(state, 'missed comma between flow collection entries');
-    } else if (ch === 0x2C/* , */) {
-      // "flow collection entries can never be completely empty", as per YAML 1.2, section 7.4
-      throwError(state, "expected the node content, but found ','");
-    }
-
-    keyTag = keyNode = valueNode = null;
-    isPair = isExplicitPair = false;
-
-    if (ch === 0x3F/* ? */) {
-      following = state.input.charCodeAt(state.position + 1);
-
-      if (is_WS_OR_EOL(following)) {
-        isPair = isExplicitPair = true;
-        state.position++;
-        skipSeparationSpace(state, true, nodeIndent);
-      }
-    }
-
-    _line = state.line; // Save the current line.
-    _lineStart = state.lineStart;
-    _pos = state.position;
-    composeNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true);
-    keyTag = state.tag;
-    keyNode = state.result;
-    skipSeparationSpace(state, true, nodeIndent);
-
-    ch = state.input.charCodeAt(state.position);
-
-    if ((isExplicitPair || state.line === _line) && ch === 0x3A/* : */) {
-      isPair = true;
-      ch = state.input.charCodeAt(++state.position);
-      skipSeparationSpace(state, true, nodeIndent);
-      composeNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true);
-      valueNode = state.result;
-    }
-
-    if (isMapping) {
-      storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, valueNode, _line, _lineStart, _pos);
-    } else if (isPair) {
-      _result.push(storeMappingPair(state, null, overridableKeys, keyTag, keyNode, valueNode, _line, _lineStart, _pos));
-    } else {
-      _result.push(keyNode);
-    }
-
-    skipSeparationSpace(state, true, nodeIndent);
-
-    ch = state.input.charCodeAt(state.position);
-
-    if (ch === 0x2C/* , */) {
-      readNext = true;
-      ch = state.input.charCodeAt(++state.position);
-    } else {
-      readNext = false;
-    }
-  }
-
-  throwError(state, 'unexpected end of the stream within a flow collection');
-}
-
-function readBlockScalar(state, nodeIndent) {
-  var captureStart,
-      folding,
-      chomping       = CHOMPING_CLIP,
-      didReadContent = false,
-      detectedIndent = false,
-      textIndent     = nodeIndent,
-      emptyLines     = 0,
-      atMoreIndented = false,
-      tmp,
-      ch;
-
-  ch = state.input.charCodeAt(state.position);
-
-  if (ch === 0x7C/* | */) {
-    folding = false;
-  } else if (ch === 0x3E/* > */) {
-    folding = true;
-  } else {
-    return false;
-  }
-
-  state.kind = 'scalar';
-  state.result = '';
-
-  while (ch !== 0) {
-    ch = state.input.charCodeAt(++state.position);
-
-    if (ch === 0x2B/* + */ || ch === 0x2D/* - */) {
-      if (CHOMPING_CLIP === chomping) {
-        chomping = (ch === 0x2B/* + */) ? CHOMPING_KEEP : CHOMPING_STRIP;
-      } else {
-        throwError(state, 'repeat of a chomping mode identifier');
-      }
-
-    } else if ((tmp = fromDecimalCode(ch)) >= 0) {
-      if (tmp === 0) {
-        throwError(state, 'bad explicit indentation width of a block scalar; it cannot be less than one');
-      } else if (!detectedIndent) {
-        textIndent = nodeIndent + tmp - 1;
-        detectedIndent = true;
-      } else {
-        throwError(state, 'repeat of an indentation width identifier');
-      }
-
-    } else {
-      break;
-    }
-  }
-
-  if (is_WHITE_SPACE(ch)) {
-    do { ch = state.input.charCodeAt(++state.position); }
-    while (is_WHITE_SPACE(ch));
-
-    if (ch === 0x23/* # */) {
-      do { ch = state.input.charCodeAt(++state.position); }
-      while (!is_EOL(ch) && (ch !== 0));
-    }
-  }
-
-  while (ch !== 0) {
-    readLineBreak(state);
-    state.lineIndent = 0;
-
-    ch = state.input.charCodeAt(state.position);
-
-    while ((!detectedIndent || state.lineIndent < textIndent) &&
-           (ch === 0x20/* Space */)) {
-      state.lineIndent++;
-      ch = state.input.charCodeAt(++state.position);
-    }
-
-    if (!detectedIndent && state.lineIndent > textIndent) {
-      textIndent = state.lineIndent;
-    }
-
-    if (is_EOL(ch)) {
-      emptyLines++;
-      continue;
-    }
-
-    // End of the scalar.
-    if (state.lineIndent < textIndent) {
-
-      // Perform the chomping.
-      if (chomping === CHOMPING_KEEP) {
-        state.result += common.repeat('\n', didReadContent ? 1 + emptyLines : emptyLines);
-      } else if (chomping === CHOMPING_CLIP) {
-        if (didReadContent) { // i.e. only if the scalar is not empty.
-          state.result += '\n';
-        }
-      }
-
-      // Break this `while` cycle and go to the funciton's epilogue.
-      break;
-    }
-
-    // Folded style: use fancy rules to handle line breaks.
-    if (folding) {
-
-      // Lines starting with white space characters (more-indented lines) are not folded.
-      if (is_WHITE_SPACE(ch)) {
-        atMoreIndented = true;
-        // except for the first content line (cf. Example 8.1)
-        state.result += common.repeat('\n', didReadContent ? 1 + emptyLines : emptyLines);
-
-      // End of more-indented block.
-      } else if (atMoreIndented) {
-        atMoreIndented = false;
-        state.result += common.repeat('\n', emptyLines + 1);
-
-      // Just one line break - perceive as the same line.
-      } else if (emptyLines === 0) {
-        if (didReadContent) { // i.e. only if we have already read some scalar content.
-          state.result += ' ';
-        }
-
-      // Several line breaks - perceive as different lines.
-      } else {
-        state.result += common.repeat('\n', emptyLines);
-      }
-
-    // Literal style: just add exact number of line breaks between content lines.
-    } else {
-      // Keep all line breaks except the header line break.
-      state.result += common.repeat('\n', didReadContent ? 1 + emptyLines : emptyLines);
-    }
-
-    didReadContent = true;
-    detectedIndent = true;
-    emptyLines = 0;
-    captureStart = state.position;
-
-    while (!is_EOL(ch) && (ch !== 0)) {
-      ch = state.input.charCodeAt(++state.position);
-    }
-
-    captureSegment(state, captureStart, state.position, false);
-  }
-
-  return true;
-}
-
-function readBlockSequence(state, nodeIndent) {
-  var _line,
-      _tag      = state.tag,
-      _anchor   = state.anchor,
-      _result   = [],
-      following,
-      detected  = false,
-      ch;
-
-  // there is a leading tab before this token, so it can't be a block sequence/mapping;
-  // it can still be flow sequence/mapping or a scalar
-  if (state.firstTabInLine !== -1) return false;
-
-  if (state.anchor !== null) {
-    state.anchorMap[state.anchor] = _result;
-  }
-
-  ch = state.input.charCodeAt(state.position);
-
-  while (ch !== 0) {
-    if (state.firstTabInLine !== -1) {
-      state.position = state.firstTabInLine;
-      throwError(state, 'tab characters must not be used in indentation');
-    }
-
-    if (ch !== 0x2D/* - */) {
-      break;
-    }
-
-    following = state.input.charCodeAt(state.position + 1);
-
-    if (!is_WS_OR_EOL(following)) {
-      break;
-    }
-
-    detected = true;
-    state.position++;
-
-    if (skipSeparationSpace(state, true, -1)) {
-      if (state.lineIndent <= nodeIndent) {
-        _result.push(null);
-        ch = state.input.charCodeAt(state.position);
-        continue;
-      }
-    }
-
-    _line = state.line;
-    composeNode(state, nodeIndent, CONTEXT_BLOCK_IN, false, true);
-    _result.push(state.result);
-    skipSeparationSpace(state, true, -1);
-
-    ch = state.input.charCodeAt(state.position);
-
-    if ((state.line === _line || state.lineIndent > nodeIndent) && (ch !== 0)) {
-      throwError(state, 'bad indentation of a sequence entry');
-    } else if (state.lineIndent < nodeIndent) {
-      break;
-    }
-  }
-
-  if (detected) {
-    state.tag = _tag;
-    state.anchor = _anchor;
-    state.kind = 'sequence';
-    state.result = _result;
-    return true;
-  }
-  return false;
-}
-
-function readBlockMapping(state, nodeIndent, flowIndent) {
-  var following,
-      allowCompact,
-      _line,
-      _keyLine,
-      _keyLineStart,
-      _keyPos,
-      _tag          = state.tag,
-      _anchor       = state.anchor,
-      _result       = {},
-      overridableKeys = Object.create(null),
-      keyTag        = null,
-      keyNode       = null,
-      valueNode     = null,
-      atExplicitKey = false,
-      detected      = false,
-      ch;
-
-  // there is a leading tab before this token, so it can't be a block sequence/mapping;
-  // it can still be flow sequence/mapping or a scalar
-  if (state.firstTabInLine !== -1) return false;
-
-  if (state.anchor !== null) {
-    state.anchorMap[state.anchor] = _result;
-  }
-
-  ch = state.input.charCodeAt(state.position);
-
-  while (ch !== 0) {
-    if (!atExplicitKey && state.firstTabInLine !== -1) {
-      state.position = state.firstTabInLine;
-      throwError(state, 'tab characters must not be used in indentation');
-    }
-
-    following = state.input.charCodeAt(state.position + 1);
-    _line = state.line; // Save the current line.
-
-    //
-    // Explicit notation case. There are two separate blocks:
-    // first for the key (denoted by "?") and second for the value (denoted by ":")
-    //
-    if ((ch === 0x3F/* ? */ || ch === 0x3A/* : */) && is_WS_OR_EOL(following)) {
-
-      if (ch === 0x3F/* ? */) {
-        if (atExplicitKey) {
-          storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, null, _keyLine, _keyLineStart, _keyPos);
-          keyTag = keyNode = valueNode = null;
-        }
-
-        detected = true;
-        atExplicitKey = true;
-        allowCompact = true;
-
-      } else if (atExplicitKey) {
-        // i.e. 0x3A/* : */ === character after the explicit key.
-        atExplicitKey = false;
-        allowCompact = true;
-
-      } else {
-        throwError(state, 'incomplete explicit mapping pair; a key node is missed; or followed by a non-tabulated empty line');
-      }
-
-      state.position += 1;
-      ch = following;
-
-    //
-    // Implicit notation case. Flow-style node as the key first, then ":", and the value.
-    //
-    } else {
-      _keyLine = state.line;
-      _keyLineStart = state.lineStart;
-      _keyPos = state.position;
-
-      if (!composeNode(state, flowIndent, CONTEXT_FLOW_OUT, false, true)) {
-        // Neither implicit nor explicit notation.
-        // Reading is done. Go to the epilogue.
-        break;
-      }
-
-      if (state.line === _line) {
-        ch = state.input.charCodeAt(state.position);
-
-        while (is_WHITE_SPACE(ch)) {
-          ch = state.input.charCodeAt(++state.position);
-        }
-
-        if (ch === 0x3A/* : */) {
-          ch = state.input.charCodeAt(++state.position);
-
-          if (!is_WS_OR_EOL(ch)) {
-            throwError(state, 'a whitespace character is expected after the key-value separator within a block mapping');
-          }
-
-          if (atExplicitKey) {
-            storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, null, _keyLine, _keyLineStart, _keyPos);
-            keyTag = keyNode = valueNode = null;
-          }
-
-          detected = true;
-          atExplicitKey = false;
-          allowCompact = false;
-          keyTag = state.tag;
-          keyNode = state.result;
-
-        } else if (detected) {
-          throwError(state, 'can not read an implicit mapping pair; a colon is missed');
-
-        } else {
-          state.tag = _tag;
-          state.anchor = _anchor;
-          return true; // Keep the result of `composeNode`.
-        }
-
-      } else if (detected) {
-        throwError(state, 'can not read a block mapping entry; a multiline key may not be an implicit key');
-
-      } else {
-        state.tag = _tag;
-        state.anchor = _anchor;
-        return true; // Keep the result of `composeNode`.
-      }
-    }
-
-    //
-    // Common reading code for both explicit and implicit notations.
-    //
-    if (state.line === _line || state.lineIndent > nodeIndent) {
-      if (atExplicitKey) {
-        _keyLine = state.line;
-        _keyLineStart = state.lineStart;
-        _keyPos = state.position;
-      }
-
-      if (composeNode(state, nodeIndent, CONTEXT_BLOCK_OUT, true, allowCompact)) {
-        if (atExplicitKey) {
-          keyNode = state.result;
-        } else {
-          valueNode = state.result;
-        }
-      }
-
-      if (!atExplicitKey) {
-        storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, valueNode, _keyLine, _keyLineStart, _keyPos);
-        keyTag = keyNode = valueNode = null;
-      }
-
-      skipSeparationSpace(state, true, -1);
-      ch = state.input.charCodeAt(state.position);
-    }
-
-    if ((state.line === _line || state.lineIndent > nodeIndent) && (ch !== 0)) {
-      throwError(state, 'bad indentation of a mapping entry');
-    } else if (state.lineIndent < nodeIndent) {
-      break;
-    }
-  }
-
-  //
-  // Epilogue.
-  //
-
-  // Special case: last mapping's node contains only the key in explicit notation.
-  if (atExplicitKey) {
-    storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, null, _keyLine, _keyLineStart, _keyPos);
-  }
-
-  // Expose the resulting mapping.
-  if (detected) {
-    state.tag = _tag;
-    state.anchor = _anchor;
-    state.kind = 'mapping';
-    state.result = _result;
-  }
-
-  return detected;
-}
-
-function readTagProperty(state) {
-  var _position,
-      isVerbatim = false,
-      isNamed    = false,
-      tagHandle,
-      tagName,
-      ch;
-
-  ch = state.input.charCodeAt(state.position);
-
-  if (ch !== 0x21/* ! */) return false;
-
-  if (state.tag !== null) {
-    throwError(state, 'duplication of a tag property');
-  }
-
-  ch = state.input.charCodeAt(++state.position);
-
-  if (ch === 0x3C/* < */) {
-    isVerbatim = true;
-    ch = state.input.charCodeAt(++state.position);
-
-  } else if (ch === 0x21/* ! */) {
-    isNamed = true;
-    tagHandle = '!!';
-    ch = state.input.charCodeAt(++state.position);
-
-  } else {
-    tagHandle = '!';
-  }
-
-  _position = state.position;
-
-  if (isVerbatim) {
-    do { ch = state.input.charCodeAt(++state.position); }
-    while (ch !== 0 && ch !== 0x3E/* > */);
-
-    if (state.position < state.length) {
-      tagName = state.input.slice(_position, state.position);
-      ch = state.input.charCodeAt(++state.position);
-    } else {
-      throwError(state, 'unexpected end of the stream within a verbatim tag');
-    }
-  } else {
-    while (ch !== 0 && !is_WS_OR_EOL(ch)) {
-
-      if (ch === 0x21/* ! */) {
-        if (!isNamed) {
-          tagHandle = state.input.slice(_position - 1, state.position + 1);
-
-          if (!PATTERN_TAG_HANDLE.test(tagHandle)) {
-            throwError(state, 'named tag handle cannot contain such characters');
-          }
-
-          isNamed = true;
-          _position = state.position + 1;
-        } else {
-          throwError(state, 'tag suffix cannot contain exclamation marks');
-        }
-      }
-
-      ch = state.input.charCodeAt(++state.position);
-    }
-
-    tagName = state.input.slice(_position, state.position);
-
-    if (PATTERN_FLOW_INDICATORS.test(tagName)) {
-      throwError(state, 'tag suffix cannot contain flow indicator characters');
-    }
-  }
-
-  if (tagName && !PATTERN_TAG_URI.test(tagName)) {
-    throwError(state, 'tag name cannot contain such characters: ' + tagName);
-  }
-
-  try {
-    tagName = decodeURIComponent(tagName);
-  } catch (err) {
-    throwError(state, 'tag name is malformed: ' + tagName);
-  }
-
-  if (isVerbatim) {
-    state.tag = tagName;
-
-  } else if (_hasOwnProperty.call(state.tagMap, tagHandle)) {
-    state.tag = state.tagMap[tagHandle] + tagName;
-
-  } else if (tagHandle === '!') {
-    state.tag = '!' + tagName;
-
-  } else if (tagHandle === '!!') {
-    state.tag = 'tag:yaml.org,2002:' + tagName;
-
-  } else {
-    throwError(state, 'undeclared tag handle "' + tagHandle + '"');
-  }
-
-  return true;
-}
-
-function readAnchorProperty(state) {
-  var _position,
-      ch;
-
-  ch = state.input.charCodeAt(state.position);
-
-  if (ch !== 0x26/* & */) return false;
-
-  if (state.anchor !== null) {
-    throwError(state, 'duplication of an anchor property');
-  }
-
-  ch = state.input.charCodeAt(++state.position);
-  _position = state.position;
-
-  while (ch !== 0 && !is_WS_OR_EOL(ch) && !is_FLOW_INDICATOR(ch)) {
-    ch = state.input.charCodeAt(++state.position);
-  }
-
-  if (state.position === _position) {
-    throwError(state, 'name of an anchor node must contain at least one character');
-  }
-
-  state.anchor = state.input.slice(_position, state.position);
-  return true;
-}
-
-function readAlias(state) {
-  var _position, alias,
-      ch;
-
-  ch = state.input.charCodeAt(state.position);
-
-  if (ch !== 0x2A/* * */) return false;
-
-  ch = state.input.charCodeAt(++state.position);
-  _position = state.position;
-
-  while (ch !== 0 && !is_WS_OR_EOL(ch) && !is_FLOW_INDICATOR(ch)) {
-    ch = state.input.charCodeAt(++state.position);
-  }
-
-  if (state.position === _position) {
-    throwError(state, 'name of an alias node must contain at least one character');
-  }
-
-  alias = state.input.slice(_position, state.position);
-
-  if (!_hasOwnProperty.call(state.anchorMap, alias)) {
-    throwError(state, 'unidentified alias "' + alias + '"');
-  }
-
-  state.result = state.anchorMap[alias];
-  skipSeparationSpace(state, true, -1);
-  return true;
-}
-
-function composeNode(state, parentIndent, nodeContext, allowToSeek, allowCompact) {
-  var allowBlockStyles,
-      allowBlockScalars,
-      allowBlockCollections,
-      indentStatus = 1, // 1: this>parent, 0: this=parent, -1: this<parent
-      atNewLine  = false,
-      hasContent = false,
-      typeIndex,
-      typeQuantity,
-      typeList,
-      type,
-      flowIndent,
-      blockIndent;
-
-  if (state.listener !== null) {
-    state.listener('open', state);
-  }
-
-  state.tag    = null;
-  state.anchor = null;
-  state.kind   = null;
-  state.result = null;
-
-  allowBlockStyles = allowBlockScalars = allowBlockCollections =
-    CONTEXT_BLOCK_OUT === nodeContext ||
-    CONTEXT_BLOCK_IN  === nodeContext;
-
-  if (allowToSeek) {
-    if (skipSeparationSpace(state, true, -1)) {
-      atNewLine = true;
-
-      if (state.lineIndent > parentIndent) {
-        indentStatus = 1;
-      } else if (state.lineIndent === parentIndent) {
-        indentStatus = 0;
-      } else if (state.lineIndent < parentIndent) {
-        indentStatus = -1;
-      }
-    }
-  }
-
-  if (indentStatus === 1) {
-    while (readTagProperty(state) || readAnchorProperty(state)) {
-      if (skipSeparationSpace(state, true, -1)) {
-        atNewLine = true;
-        allowBlockCollections = allowBlockStyles;
-
-        if (state.lineIndent > parentIndent) {
-          indentStatus = 1;
-        } else if (state.lineIndent === parentIndent) {
-          indentStatus = 0;
-        } else if (state.lineIndent < parentIndent) {
-          indentStatus = -1;
-        }
-      } else {
-        allowBlockCollections = false;
-      }
-    }
-  }
-
-  if (allowBlockCollections) {
-    allowBlockCollections = atNewLine || allowCompact;
-  }
-
-  if (indentStatus === 1 || CONTEXT_BLOCK_OUT === nodeContext) {
-    if (CONTEXT_FLOW_IN === nodeContext || CONTEXT_FLOW_OUT === nodeContext) {
-      flowIndent = parentIndent;
-    } else {
-      flowIndent = parentIndent + 1;
-    }
-
-    blockIndent = state.position - state.lineStart;
-
-    if (indentStatus === 1) {
-      if (allowBlockCollections &&
-          (readBlockSequence(state, blockIndent) ||
-           readBlockMapping(state, blockIndent, flowIndent)) ||
-          readFlowCollection(state, flowIndent)) {
-        hasContent = true;
-      } else {
-        if ((allowBlockScalars && readBlockScalar(state, flowIndent)) ||
-            readSingleQuotedScalar(state, flowIndent) ||
-            readDoubleQuotedScalar(state, flowIndent)) {
-          hasContent = true;
-
-        } else if (readAlias(state)) {
-          hasContent = true;
-
-          if (state.tag !== null || state.anchor !== null) {
-            throwError(state, 'alias node should not have any properties');
-          }
-
-        } else if (readPlainScalar(state, flowIndent, CONTEXT_FLOW_IN === nodeContext)) {
-          hasContent = true;
-
-          if (state.tag === null) {
-            state.tag = '?';
-          }
-        }
-
-        if (state.anchor !== null) {
-          state.anchorMap[state.anchor] = state.result;
-        }
-      }
-    } else if (indentStatus === 0) {
-      // Special case: block sequences are allowed to have same indentation level as the parent.
-      // http://www.yaml.org/spec/1.2/spec.html#id2799784
-      hasContent = allowBlockCollections && readBlockSequence(state, blockIndent);
-    }
-  }
-
-  if (state.tag === null) {
-    if (state.anchor !== null) {
-      state.anchorMap[state.anchor] = state.result;
-    }
-
-  } else if (state.tag === '?') {
-    // Implicit resolving is not allowed for non-scalar types, and '?'
-    // non-specific tag is only automatically assigned to plain scalars.
-    //
-    // We only need to check kind conformity in case user explicitly assigns '?'
-    // tag, for example like this: "!<?> [0]"
-    //
-    if (state.result !== null && state.kind !== 'scalar') {
-      throwError(state, 'unacceptable node kind for !<?> tag; it should be "scalar", not "' + state.kind + '"');
-    }
-
-    for (typeIndex = 0, typeQuantity = state.implicitTypes.length; typeIndex < typeQuantity; typeIndex += 1) {
-      type = state.implicitTypes[typeIndex];
-
-      if (type.resolve(state.result)) { // `state.result` updated in resolver if matched
-        state.result = type.construct(state.result);
-        state.tag = type.tag;
-        if (state.anchor !== null) {
-          state.anchorMap[state.anchor] = state.result;
-        }
-        break;
-      }
-    }
-  } else if (state.tag !== '!') {
-    if (_hasOwnProperty.call(state.typeMap[state.kind || 'fallback'], state.tag)) {
-      type = state.typeMap[state.kind || 'fallback'][state.tag];
-    } else {
-      // looking for multi type
-      type = null;
-      typeList = state.typeMap.multi[state.kind || 'fallback'];
-
-      for (typeIndex = 0, typeQuantity = typeList.length; typeIndex < typeQuantity; typeIndex += 1) {
-        if (state.tag.slice(0, typeList[typeIndex].tag.length) === typeList[typeIndex].tag) {
-          type = typeList[typeIndex];
-          break;
-        }
-      }
-    }
-
-    if (!type) {
-      throwError(state, 'unknown tag !<' + state.tag + '>');
-    }
-
-    if (state.result !== null && type.kind !== state.kind) {
-      throwError(state, 'unacceptable node kind for !<' + state.tag + '> tag; it should be "' + type.kind + '", not "' + state.kind + '"');
-    }
-
-    if (!type.resolve(state.result, state.tag)) { // `state.result` updated in resolver if matched
-      throwError(state, 'cannot resolve a node with !<' + state.tag + '> explicit tag');
-    } else {
-      state.result = type.construct(state.result, state.tag);
-      if (state.anchor !== null) {
-        state.anchorMap[state.anchor] = state.result;
-      }
-    }
-  }
-
-  if (state.listener !== null) {
-    state.listener('close', state);
-  }
-  return state.tag !== null ||  state.anchor !== null || hasContent;
-}
-
-function readDocument(state) {
-  var documentStart = state.position,
-      _position,
-      directiveName,
-      directiveArgs,
-      hasDirectives = false,
-      ch;
-
-  state.version = null;
-  state.checkLineBreaks = state.legacy;
-  state.tagMap = Object.create(null);
-  state.anchorMap = Object.create(null);
-
-  while ((ch = state.input.charCodeAt(state.position)) !== 0) {
-    skipSeparationSpace(state, true, -1);
-
-    ch = state.input.charCodeAt(state.position);
-
-    if (state.lineIndent > 0 || ch !== 0x25/* % */) {
-      break;
-    }
-
-    hasDirectives = true;
-    ch = state.input.charCodeAt(++state.position);
-    _position = state.position;
-
-    while (ch !== 0 && !is_WS_OR_EOL(ch)) {
-      ch = state.input.charCodeAt(++state.position);
-    }
-
-    directiveName = state.input.slice(_position, state.position);
-    directiveArgs = [];
-
-    if (directiveName.length < 1) {
-      throwError(state, 'directive name must not be less than one character in length');
-    }
-
-    while (ch !== 0) {
-      while (is_WHITE_SPACE(ch)) {
-        ch = state.input.charCodeAt(++state.position);
-      }
-
-      if (ch === 0x23/* # */) {
-        do { ch = state.input.charCodeAt(++state.position); }
-        while (ch !== 0 && !is_EOL(ch));
-        break;
-      }
-
-      if (is_EOL(ch)) break;
-
-      _position = state.position;
-
-      while (ch !== 0 && !is_WS_OR_EOL(ch)) {
-        ch = state.input.charCodeAt(++state.position);
-      }
-
-      directiveArgs.push(state.input.slice(_position, state.position));
-    }
-
-    if (ch !== 0) readLineBreak(state);
-
-    if (_hasOwnProperty.call(directiveHandlers, directiveName)) {
-      directiveHandlers[directiveName](state, directiveName, directiveArgs);
-    } else {
-      throwWarning(state, 'unknown document directive "' + directiveName + '"');
-    }
-  }
-
-  skipSeparationSpace(state, true, -1);
-
-  if (state.lineIndent === 0 &&
-      state.input.charCodeAt(state.position)     === 0x2D/* - */ &&
-      state.input.charCodeAt(state.position + 1) === 0x2D/* - */ &&
-      state.input.charCodeAt(state.position + 2) === 0x2D/* - */) {
-    state.position += 3;
-    skipSeparationSpace(state, true, -1);
-
-  } else if (hasDirectives) {
-    throwError(state, 'directives end mark is expected');
-  }
-
-  composeNode(state, state.lineIndent - 1, CONTEXT_BLOCK_OUT, false, true);
-  skipSeparationSpace(state, true, -1);
-
-  if (state.checkLineBreaks &&
-      PATTERN_NON_ASCII_LINE_BREAKS.test(state.input.slice(documentStart, state.position))) {
-    throwWarning(state, 'non-ASCII line breaks are interpreted as content');
-  }
-
-  state.documents.push(state.result);
-
-  if (state.position === state.lineStart && testDocumentSeparator(state)) {
-
-    if (state.input.charCodeAt(state.position) === 0x2E/* . */) {
-      state.position += 3;
-      skipSeparationSpace(state, true, -1);
-    }
-    return;
-  }
-
-  if (state.position < (state.length - 1)) {
-    throwError(state, 'end of the stream or a document separator is expected');
-  } else {
-    return;
-  }
-}
-
-
-function loadDocuments(input, options) {
-  input = String(input);
-  options = options || {};
-
-  if (input.length !== 0) {
-
-    // Add tailing `\n` if not exists
-    if (input.charCodeAt(input.length - 1) !== 0x0A/* LF */ &&
-        input.charCodeAt(input.length - 1) !== 0x0D/* CR */) {
-      input += '\n';
-    }
-
-    // Strip BOM
-    if (input.charCodeAt(0) === 0xFEFF) {
-      input = input.slice(1);
-    }
-  }
-
-  var state = new State(input, options);
-
-  var nullpos = input.indexOf('\0');
-
-  if (nullpos !== -1) {
-    state.position = nullpos;
-    throwError(state, 'null byte is not allowed in input');
-  }
-
-  // Use 0 as string terminator. That significantly simplifies bounds check.
-  state.input += '\0';
-
-  while (state.input.charCodeAt(state.position) === 0x20/* Space */) {
-    state.lineIndent += 1;
-    state.position += 1;
-  }
-
-  while (state.position < (state.length - 1)) {
-    readDocument(state);
-  }
-
-  return state.documents;
-}
-
-
-function loadAll(input, iterator, options) {
-  if (iterator !== null && typeof iterator === 'object' && typeof options === 'undefined') {
-    options = iterator;
-    iterator = null;
-  }
-
-  var documents = loadDocuments(input, options);
-
-  if (typeof iterator !== 'function') {
-    return documents;
-  }
-
-  for (var index = 0, length = documents.length; index < length; index += 1) {
-    iterator(documents[index]);
-  }
-}
-
-
-function load(input, options) {
-  var documents = loadDocuments(input, options);
-
-  if (documents.length === 0) {
-    /*eslint-disable no-undefined*/
-    return undefined;
-  } else if (documents.length === 1) {
-    return documents[0];
-  }
-  throw new YAMLException('expected a single document in the stream, but found more');
-}
-
-
-module.exports.loadAll = loadAll;
-module.exports.load    = load;
-
-
-/***/ }),
-
-/***/ 1082:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-/*eslint-disable max-len*/
-
-var YAMLException = __nccwpck_require__(8179);
-var Type          = __nccwpck_require__(6073);
-
-
-function compileList(schema, name, result) {
-  var exclude = [];
-
-  schema[name].forEach(function (currentType) {
-    result.forEach(function (previousType, previousIndex) {
-      if (previousType.tag === currentType.tag &&
-          previousType.kind === currentType.kind &&
-          previousType.multi === currentType.multi) {
-
-        exclude.push(previousIndex);
-      }
-    });
-
-    result.push(currentType);
-  });
-
-  return result.filter(function (type, index) {
-    return exclude.indexOf(index) === -1;
-  });
-}
-
-
-function compileMap(/* lists... */) {
-  var result = {
-        scalar: {},
-        sequence: {},
-        mapping: {},
-        fallback: {},
-        multi: {
-          scalar: [],
-          sequence: [],
-          mapping: [],
-          fallback: []
-        }
-      }, index, length;
-
-  function collectType(type) {
-    if (type.multi) {
-      result.multi[type.kind].push(type);
-      result.multi['fallback'].push(type);
-    } else {
-      result[type.kind][type.tag] = result['fallback'][type.tag] = type;
-    }
-  }
-
-  for (index = 0, length = arguments.length; index < length; index += 1) {
-    arguments[index].forEach(collectType);
-  }
-  return result;
-}
-
-
-function Schema(definition) {
-  return this.extend(definition);
-}
-
-
-Schema.prototype.extend = function extend(definition) {
-  var implicit = [];
-  var explicit = [];
-
-  if (definition instanceof Type) {
-    // Schema.extend(type)
-    explicit.push(definition);
-
-  } else if (Array.isArray(definition)) {
-    // Schema.extend([ type1, type2, ... ])
-    explicit = explicit.concat(definition);
-
-  } else if (definition && (Array.isArray(definition.implicit) || Array.isArray(definition.explicit))) {
-    // Schema.extend({ explicit: [ type1, type2, ... ], implicit: [ type1, type2, ... ] })
-    if (definition.implicit) implicit = implicit.concat(definition.implicit);
-    if (definition.explicit) explicit = explicit.concat(definition.explicit);
-
-  } else {
-    throw new YAMLException('Schema.extend argument should be a Type, [ Type ], ' +
-      'or a schema definition ({ implicit: [...], explicit: [...] })');
-  }
-
-  implicit.forEach(function (type) {
-    if (!(type instanceof Type)) {
-      throw new YAMLException('Specified list of YAML types (or a single Type object) contains a non-Type object.');
-    }
-
-    if (type.loadKind && type.loadKind !== 'scalar') {
-      throw new YAMLException('There is a non-scalar type in the implicit list of a schema. Implicit resolving of such types is not supported.');
-    }
-
-    if (type.multi) {
-      throw new YAMLException('There is a multi type in the implicit list of a schema. Multi tags can only be listed as explicit.');
-    }
-  });
-
-  explicit.forEach(function (type) {
-    if (!(type instanceof Type)) {
-      throw new YAMLException('Specified list of YAML types (or a single Type object) contains a non-Type object.');
-    }
-  });
-
-  var result = Object.create(Schema.prototype);
-
-  result.implicit = (this.implicit || []).concat(implicit);
-  result.explicit = (this.explicit || []).concat(explicit);
-
-  result.compiledImplicit = compileList(result, 'implicit', []);
-  result.compiledExplicit = compileList(result, 'explicit', []);
-  result.compiledTypeMap  = compileMap(result.compiledImplicit, result.compiledExplicit);
-
-  return result;
-};
-
-
-module.exports = Schema;
-
-
-/***/ }),
-
-/***/ 2011:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-// Standard YAML's Core schema.
-// http://www.yaml.org/spec/1.2/spec.html#id2804923
-//
-// NOTE: JS-YAML does not support schema-specific tag resolution restrictions.
-// So, Core schema has no distinctions from JSON schema is JS-YAML.
-
-
-
-
-
-module.exports = __nccwpck_require__(1035);
-
-
-/***/ }),
-
-/***/ 8759:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-// JS-YAML's default schema for `safeLoad` function.
-// It is not described in the YAML specification.
-//
-// This schema is based on standard YAML's Core schema and includes most of
-// extra types described at YAML tag repository. (http://yaml.org/type/)
-
-
-
-
-
-module.exports = __nccwpck_require__(2011).extend({
-  implicit: [
-    __nccwpck_require__(9212),
-    __nccwpck_require__(6104)
-  ],
-  explicit: [
-    __nccwpck_require__(7900),
-    __nccwpck_require__(9046),
-    __nccwpck_require__(6860),
-    __nccwpck_require__(9548)
-  ]
-});
-
-
-/***/ }),
-
-/***/ 8562:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-// Standard YAML's Failsafe schema.
-// http://www.yaml.org/spec/1.2/spec.html#id2802346
-
-
-
-
-
-var Schema = __nccwpck_require__(1082);
-
-
-module.exports = new Schema({
-  explicit: [
-    __nccwpck_require__(3619),
-    __nccwpck_require__(7283),
-    __nccwpck_require__(6150)
-  ]
-});
-
-
-/***/ }),
-
-/***/ 1035:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-// Standard YAML's JSON schema.
-// http://www.yaml.org/spec/1.2/spec.html#id2803231
-//
-// NOTE: JS-YAML does not support schema-specific tag resolution restrictions.
-// So, this schema is not such strict as defined in the YAML specification.
-// It allows numbers in binary notaion, use `Null` and `NULL` as `null`, etc.
-
-
-
-
-
-module.exports = __nccwpck_require__(8562).extend({
-  implicit: [
-    __nccwpck_require__(721),
-    __nccwpck_require__(4993),
-    __nccwpck_require__(1615),
-    __nccwpck_require__(2705)
-  ]
-});
-
-
-/***/ }),
-
-/***/ 6975:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-
-var common = __nccwpck_require__(6829);
-
-
-// get snippet for a single line, respecting maxLength
-function getLine(buffer, lineStart, lineEnd, position, maxLineLength) {
-  var head = '';
-  var tail = '';
-  var maxHalfLength = Math.floor(maxLineLength / 2) - 1;
-
-  if (position - lineStart > maxHalfLength) {
-    head = ' ... ';
-    lineStart = position - maxHalfLength + head.length;
-  }
-
-  if (lineEnd - position > maxHalfLength) {
-    tail = ' ...';
-    lineEnd = position + maxHalfLength - tail.length;
-  }
-
-  return {
-    str: head + buffer.slice(lineStart, lineEnd).replace(/\t/g, '→') + tail,
-    pos: position - lineStart + head.length // relative position
-  };
-}
-
-
-function padStart(string, max) {
-  return common.repeat(' ', max - string.length) + string;
-}
-
-
-function makeSnippet(mark, options) {
-  options = Object.create(options || null);
-
-  if (!mark.buffer) return null;
-
-  if (!options.maxLength) options.maxLength = 79;
-  if (typeof options.indent      !== 'number') options.indent      = 1;
-  if (typeof options.linesBefore !== 'number') options.linesBefore = 3;
-  if (typeof options.linesAfter  !== 'number') options.linesAfter  = 2;
-
-  var re = /\r?\n|\r|\0/g;
-  var lineStarts = [ 0 ];
-  var lineEnds = [];
-  var match;
-  var foundLineNo = -1;
-
-  while ((match = re.exec(mark.buffer))) {
-    lineEnds.push(match.index);
-    lineStarts.push(match.index + match[0].length);
-
-    if (mark.position <= match.index && foundLineNo < 0) {
-      foundLineNo = lineStarts.length - 2;
-    }
-  }
-
-  if (foundLineNo < 0) foundLineNo = lineStarts.length - 1;
-
-  var result = '', i, line;
-  var lineNoLength = Math.min(mark.line + options.linesAfter, lineEnds.length).toString().length;
-  var maxLineLength = options.maxLength - (options.indent + lineNoLength + 3);
-
-  for (i = 1; i <= options.linesBefore; i++) {
-    if (foundLineNo - i < 0) break;
-    line = getLine(
-      mark.buffer,
-      lineStarts[foundLineNo - i],
-      lineEnds[foundLineNo - i],
-      mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo - i]),
-      maxLineLength
-    );
-    result = common.repeat(' ', options.indent) + padStart((mark.line - i + 1).toString(), lineNoLength) +
-      ' | ' + line.str + '\n' + result;
-  }
-
-  line = getLine(mark.buffer, lineStarts[foundLineNo], lineEnds[foundLineNo], mark.position, maxLineLength);
-  result += common.repeat(' ', options.indent) + padStart((mark.line + 1).toString(), lineNoLength) +
-    ' | ' + line.str + '\n';
-  result += common.repeat('-', options.indent + lineNoLength + 3 + line.pos) + '^' + '\n';
-
-  for (i = 1; i <= options.linesAfter; i++) {
-    if (foundLineNo + i >= lineEnds.length) break;
-    line = getLine(
-      mark.buffer,
-      lineStarts[foundLineNo + i],
-      lineEnds[foundLineNo + i],
-      mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo + i]),
-      maxLineLength
-    );
-    result += common.repeat(' ', options.indent) + padStart((mark.line + i + 1).toString(), lineNoLength) +
-      ' | ' + line.str + '\n';
-  }
-
-  return result.replace(/\n$/, '');
-}
-
-
-module.exports = makeSnippet;
-
-
-/***/ }),
-
-/***/ 6073:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var YAMLException = __nccwpck_require__(8179);
-
-var TYPE_CONSTRUCTOR_OPTIONS = [
-  'kind',
-  'multi',
-  'resolve',
-  'construct',
-  'instanceOf',
-  'predicate',
-  'represent',
-  'representName',
-  'defaultStyle',
-  'styleAliases'
-];
-
-var YAML_NODE_KINDS = [
-  'scalar',
-  'sequence',
-  'mapping'
-];
-
-function compileStyleAliases(map) {
-  var result = {};
-
-  if (map !== null) {
-    Object.keys(map).forEach(function (style) {
-      map[style].forEach(function (alias) {
-        result[String(alias)] = style;
-      });
-    });
-  }
-
-  return result;
-}
-
-function Type(tag, options) {
-  options = options || {};
-
-  Object.keys(options).forEach(function (name) {
-    if (TYPE_CONSTRUCTOR_OPTIONS.indexOf(name) === -1) {
-      throw new YAMLException('Unknown option "' + name + '" is met in definition of "' + tag + '" YAML type.');
-    }
-  });
-
-  // TODO: Add tag format check.
-  this.tag           = tag;
-  this.kind          = options['kind']          || null;
-  this.resolve       = options['resolve']       || function () { return true; };
-  this.construct     = options['construct']     || function (data) { return data; };
-  this.instanceOf    = options['instanceOf']    || null;
-  this.predicate     = options['predicate']     || null;
-  this.represent     = options['represent']     || null;
-  this.representName = options['representName'] || null;
-  this.defaultStyle  = options['defaultStyle']  || null;
-  this.multi         = options['multi']         || false;
-  this.styleAliases  = compileStyleAliases(options['styleAliases'] || null);
-
-  if (YAML_NODE_KINDS.indexOf(this.kind) === -1) {
-    throw new YAMLException('Unknown kind "' + this.kind + '" is specified for "' + tag + '" YAML type.');
-  }
-}
-
-module.exports = Type;
-
-
-/***/ }),
-
-/***/ 7900:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-/*eslint-disable no-bitwise*/
-
-
-var Type = __nccwpck_require__(6073);
-
-
-// [ 64, 65, 66 ] -> [ padding, CR, LF ]
-var BASE64_MAP = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r';
-
-
-function resolveYamlBinary(data) {
-  if (data === null) return false;
-
-  var code, idx, bitlen = 0, max = data.length, map = BASE64_MAP;
-
-  // Convert one by one.
-  for (idx = 0; idx < max; idx++) {
-    code = map.indexOf(data.charAt(idx));
-
-    // Skip CR/LF
-    if (code > 64) continue;
-
-    // Fail on illegal characters
-    if (code < 0) return false;
-
-    bitlen += 6;
-  }
-
-  // If there are any bits left, source was corrupted
-  return (bitlen % 8) === 0;
-}
-
-function constructYamlBinary(data) {
-  var idx, tailbits,
-      input = data.replace(/[\r\n=]/g, ''), // remove CR/LF & padding to simplify scan
-      max = input.length,
-      map = BASE64_MAP,
-      bits = 0,
-      result = [];
-
-  // Collect by 6*4 bits (3 bytes)
-
-  for (idx = 0; idx < max; idx++) {
-    if ((idx % 4 === 0) && idx) {
-      result.push((bits >> 16) & 0xFF);
-      result.push((bits >> 8) & 0xFF);
-      result.push(bits & 0xFF);
-    }
-
-    bits = (bits << 6) | map.indexOf(input.charAt(idx));
-  }
-
-  // Dump tail
-
-  tailbits = (max % 4) * 6;
-
-  if (tailbits === 0) {
-    result.push((bits >> 16) & 0xFF);
-    result.push((bits >> 8) & 0xFF);
-    result.push(bits & 0xFF);
-  } else if (tailbits === 18) {
-    result.push((bits >> 10) & 0xFF);
-    result.push((bits >> 2) & 0xFF);
-  } else if (tailbits === 12) {
-    result.push((bits >> 4) & 0xFF);
-  }
-
-  return new Uint8Array(result);
-}
-
-function representYamlBinary(object /*, style*/) {
-  var result = '', bits = 0, idx, tail,
-      max = object.length,
-      map = BASE64_MAP;
-
-  // Convert every three bytes to 4 ASCII characters.
-
-  for (idx = 0; idx < max; idx++) {
-    if ((idx % 3 === 0) && idx) {
-      result += map[(bits >> 18) & 0x3F];
-      result += map[(bits >> 12) & 0x3F];
-      result += map[(bits >> 6) & 0x3F];
-      result += map[bits & 0x3F];
-    }
-
-    bits = (bits << 8) + object[idx];
-  }
-
-  // Dump tail
-
-  tail = max % 3;
-
-  if (tail === 0) {
-    result += map[(bits >> 18) & 0x3F];
-    result += map[(bits >> 12) & 0x3F];
-    result += map[(bits >> 6) & 0x3F];
-    result += map[bits & 0x3F];
-  } else if (tail === 2) {
-    result += map[(bits >> 10) & 0x3F];
-    result += map[(bits >> 4) & 0x3F];
-    result += map[(bits << 2) & 0x3F];
-    result += map[64];
-  } else if (tail === 1) {
-    result += map[(bits >> 2) & 0x3F];
-    result += map[(bits << 4) & 0x3F];
-    result += map[64];
-    result += map[64];
-  }
-
-  return result;
-}
-
-function isBinary(obj) {
-  return Object.prototype.toString.call(obj) ===  '[object Uint8Array]';
-}
-
-module.exports = new Type('tag:yaml.org,2002:binary', {
-  kind: 'scalar',
-  resolve: resolveYamlBinary,
-  construct: constructYamlBinary,
-  predicate: isBinary,
-  represent: representYamlBinary
-});
-
-
-/***/ }),
-
-/***/ 4993:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-function resolveYamlBoolean(data) {
-  if (data === null) return false;
-
-  var max = data.length;
-
-  return (max === 4 && (data === 'true' || data === 'True' || data === 'TRUE')) ||
-         (max === 5 && (data === 'false' || data === 'False' || data === 'FALSE'));
-}
-
-function constructYamlBoolean(data) {
-  return data === 'true' ||
-         data === 'True' ||
-         data === 'TRUE';
-}
-
-function isBoolean(object) {
-  return Object.prototype.toString.call(object) === '[object Boolean]';
-}
-
-module.exports = new Type('tag:yaml.org,2002:bool', {
-  kind: 'scalar',
-  resolve: resolveYamlBoolean,
-  construct: constructYamlBoolean,
-  predicate: isBoolean,
-  represent: {
-    lowercase: function (object) { return object ? 'true' : 'false'; },
-    uppercase: function (object) { return object ? 'TRUE' : 'FALSE'; },
-    camelcase: function (object) { return object ? 'True' : 'False'; }
-  },
-  defaultStyle: 'lowercase'
-});
-
-
-/***/ }),
-
-/***/ 2705:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var common = __nccwpck_require__(6829);
-var Type   = __nccwpck_require__(6073);
-
-var YAML_FLOAT_PATTERN = new RegExp(
-  // 2.5e4, 2.5 and integers
-  '^(?:[-+]?(?:[0-9][0-9_]*)(?:\\.[0-9_]*)?(?:[eE][-+]?[0-9]+)?' +
-  // .2e4, .2
-  // special case, seems not from spec
-  '|\\.[0-9_]+(?:[eE][-+]?[0-9]+)?' +
-  // .inf
-  '|[-+]?\\.(?:inf|Inf|INF)' +
-  // .nan
-  '|\\.(?:nan|NaN|NAN))$');
-
-function resolveYamlFloat(data) {
-  if (data === null) return false;
-
-  if (!YAML_FLOAT_PATTERN.test(data) ||
-      // Quick hack to not allow integers end with `_`
-      // Probably should update regexp & check speed
-      data[data.length - 1] === '_') {
-    return false;
-  }
-
-  return true;
-}
-
-function constructYamlFloat(data) {
-  var value, sign;
-
-  value  = data.replace(/_/g, '').toLowerCase();
-  sign   = value[0] === '-' ? -1 : 1;
-
-  if ('+-'.indexOf(value[0]) >= 0) {
-    value = value.slice(1);
-  }
-
-  if (value === '.inf') {
-    return (sign === 1) ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
-
-  } else if (value === '.nan') {
-    return NaN;
-  }
-  return sign * parseFloat(value, 10);
-}
-
-
-var SCIENTIFIC_WITHOUT_DOT = /^[-+]?[0-9]+e/;
-
-function representYamlFloat(object, style) {
-  var res;
-
-  if (isNaN(object)) {
-    switch (style) {
-      case 'lowercase': return '.nan';
-      case 'uppercase': return '.NAN';
-      case 'camelcase': return '.NaN';
-    }
-  } else if (Number.POSITIVE_INFINITY === object) {
-    switch (style) {
-      case 'lowercase': return '.inf';
-      case 'uppercase': return '.INF';
-      case 'camelcase': return '.Inf';
-    }
-  } else if (Number.NEGATIVE_INFINITY === object) {
-    switch (style) {
-      case 'lowercase': return '-.inf';
-      case 'uppercase': return '-.INF';
-      case 'camelcase': return '-.Inf';
-    }
-  } else if (common.isNegativeZero(object)) {
-    return '-0.0';
-  }
-
-  res = object.toString(10);
-
-  // JS stringifier can build scientific format without dots: 5e-100,
-  // while YAML requres dot: 5.e-100. Fix it with simple hack
-
-  return SCIENTIFIC_WITHOUT_DOT.test(res) ? res.replace('e', '.e') : res;
-}
-
-function isFloat(object) {
-  return (Object.prototype.toString.call(object) === '[object Number]') &&
-         (object % 1 !== 0 || common.isNegativeZero(object));
-}
-
-module.exports = new Type('tag:yaml.org,2002:float', {
-  kind: 'scalar',
-  resolve: resolveYamlFloat,
-  construct: constructYamlFloat,
-  predicate: isFloat,
-  represent: representYamlFloat,
-  defaultStyle: 'lowercase'
-});
-
-
-/***/ }),
-
-/***/ 1615:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var common = __nccwpck_require__(6829);
-var Type   = __nccwpck_require__(6073);
-
-function isHexCode(c) {
-  return ((0x30/* 0 */ <= c) && (c <= 0x39/* 9 */)) ||
-         ((0x41/* A */ <= c) && (c <= 0x46/* F */)) ||
-         ((0x61/* a */ <= c) && (c <= 0x66/* f */));
-}
-
-function isOctCode(c) {
-  return ((0x30/* 0 */ <= c) && (c <= 0x37/* 7 */));
-}
-
-function isDecCode(c) {
-  return ((0x30/* 0 */ <= c) && (c <= 0x39/* 9 */));
-}
-
-function resolveYamlInteger(data) {
-  if (data === null) return false;
-
-  var max = data.length,
-      index = 0,
-      hasDigits = false,
-      ch;
-
-  if (!max) return false;
-
-  ch = data[index];
-
-  // sign
-  if (ch === '-' || ch === '+') {
-    ch = data[++index];
-  }
-
-  if (ch === '0') {
-    // 0
-    if (index + 1 === max) return true;
-    ch = data[++index];
-
-    // base 2, base 8, base 16
-
-    if (ch === 'b') {
-      // base 2
-      index++;
-
-      for (; index < max; index++) {
-        ch = data[index];
-        if (ch === '_') continue;
-        if (ch !== '0' && ch !== '1') return false;
-        hasDigits = true;
-      }
-      return hasDigits && ch !== '_';
-    }
-
-
-    if (ch === 'x') {
-      // base 16
-      index++;
-
-      for (; index < max; index++) {
-        ch = data[index];
-        if (ch === '_') continue;
-        if (!isHexCode(data.charCodeAt(index))) return false;
-        hasDigits = true;
-      }
-      return hasDigits && ch !== '_';
-    }
-
-
-    if (ch === 'o') {
-      // base 8
-      index++;
-
-      for (; index < max; index++) {
-        ch = data[index];
-        if (ch === '_') continue;
-        if (!isOctCode(data.charCodeAt(index))) return false;
-        hasDigits = true;
-      }
-      return hasDigits && ch !== '_';
-    }
-  }
-
-  // base 10 (except 0)
-
-  // value should not start with `_`;
-  if (ch === '_') return false;
-
-  for (; index < max; index++) {
-    ch = data[index];
-    if (ch === '_') continue;
-    if (!isDecCode(data.charCodeAt(index))) {
-      return false;
-    }
-    hasDigits = true;
-  }
-
-  // Should have digits and should not end with `_`
-  if (!hasDigits || ch === '_') return false;
-
-  return true;
-}
-
-function constructYamlInteger(data) {
-  var value = data, sign = 1, ch;
-
-  if (value.indexOf('_') !== -1) {
-    value = value.replace(/_/g, '');
-  }
-
-  ch = value[0];
-
-  if (ch === '-' || ch === '+') {
-    if (ch === '-') sign = -1;
-    value = value.slice(1);
-    ch = value[0];
-  }
-
-  if (value === '0') return 0;
-
-  if (ch === '0') {
-    if (value[1] === 'b') return sign * parseInt(value.slice(2), 2);
-    if (value[1] === 'x') return sign * parseInt(value.slice(2), 16);
-    if (value[1] === 'o') return sign * parseInt(value.slice(2), 8);
-  }
-
-  return sign * parseInt(value, 10);
-}
-
-function isInteger(object) {
-  return (Object.prototype.toString.call(object)) === '[object Number]' &&
-         (object % 1 === 0 && !common.isNegativeZero(object));
-}
-
-module.exports = new Type('tag:yaml.org,2002:int', {
-  kind: 'scalar',
-  resolve: resolveYamlInteger,
-  construct: constructYamlInteger,
-  predicate: isInteger,
-  represent: {
-    binary:      function (obj) { return obj >= 0 ? '0b' + obj.toString(2) : '-0b' + obj.toString(2).slice(1); },
-    octal:       function (obj) { return obj >= 0 ? '0o'  + obj.toString(8) : '-0o'  + obj.toString(8).slice(1); },
-    decimal:     function (obj) { return obj.toString(10); },
-    /* eslint-disable max-len */
-    hexadecimal: function (obj) { return obj >= 0 ? '0x' + obj.toString(16).toUpperCase() :  '-0x' + obj.toString(16).toUpperCase().slice(1); }
-  },
-  defaultStyle: 'decimal',
-  styleAliases: {
-    binary:      [ 2,  'bin' ],
-    octal:       [ 8,  'oct' ],
-    decimal:     [ 10, 'dec' ],
-    hexadecimal: [ 16, 'hex' ]
-  }
-});
-
-
-/***/ }),
-
-/***/ 6150:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-module.exports = new Type('tag:yaml.org,2002:map', {
-  kind: 'mapping',
-  construct: function (data) { return data !== null ? data : {}; }
-});
-
-
-/***/ }),
-
-/***/ 6104:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-function resolveYamlMerge(data) {
-  return data === '<<' || data === null;
-}
-
-module.exports = new Type('tag:yaml.org,2002:merge', {
-  kind: 'scalar',
-  resolve: resolveYamlMerge
-});
-
-
-/***/ }),
-
-/***/ 721:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-function resolveYamlNull(data) {
-  if (data === null) return true;
-
-  var max = data.length;
-
-  return (max === 1 && data === '~') ||
-         (max === 4 && (data === 'null' || data === 'Null' || data === 'NULL'));
-}
-
-function constructYamlNull() {
-  return null;
-}
-
-function isNull(object) {
-  return object === null;
-}
-
-module.exports = new Type('tag:yaml.org,2002:null', {
-  kind: 'scalar',
-  resolve: resolveYamlNull,
-  construct: constructYamlNull,
-  predicate: isNull,
-  represent: {
-    canonical: function () { return '~';    },
-    lowercase: function () { return 'null'; },
-    uppercase: function () { return 'NULL'; },
-    camelcase: function () { return 'Null'; },
-    empty:     function () { return '';     }
-  },
-  defaultStyle: 'lowercase'
-});
-
-
-/***/ }),
-
-/***/ 9046:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-var _hasOwnProperty = Object.prototype.hasOwnProperty;
-var _toString       = Object.prototype.toString;
-
-function resolveYamlOmap(data) {
-  if (data === null) return true;
-
-  var objectKeys = [], index, length, pair, pairKey, pairHasKey,
-      object = data;
-
-  for (index = 0, length = object.length; index < length; index += 1) {
-    pair = object[index];
-    pairHasKey = false;
-
-    if (_toString.call(pair) !== '[object Object]') return false;
-
-    for (pairKey in pair) {
-      if (_hasOwnProperty.call(pair, pairKey)) {
-        if (!pairHasKey) pairHasKey = true;
-        else return false;
-      }
-    }
-
-    if (!pairHasKey) return false;
-
-    if (objectKeys.indexOf(pairKey) === -1) objectKeys.push(pairKey);
-    else return false;
-  }
-
-  return true;
-}
-
-function constructYamlOmap(data) {
-  return data !== null ? data : [];
-}
-
-module.exports = new Type('tag:yaml.org,2002:omap', {
-  kind: 'sequence',
-  resolve: resolveYamlOmap,
-  construct: constructYamlOmap
-});
-
-
-/***/ }),
-
-/***/ 6860:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-var _toString = Object.prototype.toString;
-
-function resolveYamlPairs(data) {
-  if (data === null) return true;
-
-  var index, length, pair, keys, result,
-      object = data;
-
-  result = new Array(object.length);
-
-  for (index = 0, length = object.length; index < length; index += 1) {
-    pair = object[index];
-
-    if (_toString.call(pair) !== '[object Object]') return false;
-
-    keys = Object.keys(pair);
-
-    if (keys.length !== 1) return false;
-
-    result[index] = [ keys[0], pair[keys[0]] ];
-  }
-
-  return true;
-}
-
-function constructYamlPairs(data) {
-  if (data === null) return [];
-
-  var index, length, pair, keys, result,
-      object = data;
-
-  result = new Array(object.length);
-
-  for (index = 0, length = object.length; index < length; index += 1) {
-    pair = object[index];
-
-    keys = Object.keys(pair);
-
-    result[index] = [ keys[0], pair[keys[0]] ];
-  }
-
-  return result;
-}
-
-module.exports = new Type('tag:yaml.org,2002:pairs', {
-  kind: 'sequence',
-  resolve: resolveYamlPairs,
-  construct: constructYamlPairs
-});
-
-
-/***/ }),
-
-/***/ 7283:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-module.exports = new Type('tag:yaml.org,2002:seq', {
-  kind: 'sequence',
-  construct: function (data) { return data !== null ? data : []; }
-});
-
-
-/***/ }),
-
-/***/ 9548:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-var _hasOwnProperty = Object.prototype.hasOwnProperty;
-
-function resolveYamlSet(data) {
-  if (data === null) return true;
-
-  var key, object = data;
-
-  for (key in object) {
-    if (_hasOwnProperty.call(object, key)) {
-      if (object[key] !== null) return false;
-    }
-  }
-
-  return true;
-}
-
-function constructYamlSet(data) {
-  return data !== null ? data : {};
-}
-
-module.exports = new Type('tag:yaml.org,2002:set', {
-  kind: 'mapping',
-  resolve: resolveYamlSet,
-  construct: constructYamlSet
-});
-
-
-/***/ }),
-
-/***/ 3619:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-module.exports = new Type('tag:yaml.org,2002:str', {
-  kind: 'scalar',
-  construct: function (data) { return data !== null ? data : ''; }
-});
-
-
-/***/ }),
-
-/***/ 9212:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var Type = __nccwpck_require__(6073);
-
-var YAML_DATE_REGEXP = new RegExp(
-  '^([0-9][0-9][0-9][0-9])'          + // [1] year
-  '-([0-9][0-9])'                    + // [2] month
-  '-([0-9][0-9])$');                   // [3] day
-
-var YAML_TIMESTAMP_REGEXP = new RegExp(
-  '^([0-9][0-9][0-9][0-9])'          + // [1] year
-  '-([0-9][0-9]?)'                   + // [2] month
-  '-([0-9][0-9]?)'                   + // [3] day
-  '(?:[Tt]|[ \\t]+)'                 + // ...
-  '([0-9][0-9]?)'                    + // [4] hour
-  ':([0-9][0-9])'                    + // [5] minute
-  ':([0-9][0-9])'                    + // [6] second
-  '(?:\\.([0-9]*))?'                 + // [7] fraction
-  '(?:[ \\t]*(Z|([-+])([0-9][0-9]?)' + // [8] tz [9] tz_sign [10] tz_hour
-  '(?::([0-9][0-9]))?))?$');           // [11] tz_minute
-
-function resolveYamlTimestamp(data) {
-  if (data === null) return false;
-  if (YAML_DATE_REGEXP.exec(data) !== null) return true;
-  if (YAML_TIMESTAMP_REGEXP.exec(data) !== null) return true;
-  return false;
-}
-
-function constructYamlTimestamp(data) {
-  var match, year, month, day, hour, minute, second, fraction = 0,
-      delta = null, tz_hour, tz_minute, date;
-
-  match = YAML_DATE_REGEXP.exec(data);
-  if (match === null) match = YAML_TIMESTAMP_REGEXP.exec(data);
-
-  if (match === null) throw new Error('Date resolve error');
-
-  // match: [1] year [2] month [3] day
-
-  year = +(match[1]);
-  month = +(match[2]) - 1; // JS month starts with 0
-  day = +(match[3]);
-
-  if (!match[4]) { // no hour
-    return new Date(Date.UTC(year, month, day));
-  }
-
-  // match: [4] hour [5] minute [6] second [7] fraction
-
-  hour = +(match[4]);
-  minute = +(match[5]);
-  second = +(match[6]);
-
-  if (match[7]) {
-    fraction = match[7].slice(0, 3);
-    while (fraction.length < 3) { // milli-seconds
-      fraction += '0';
-    }
-    fraction = +fraction;
-  }
-
-  // match: [8] tz [9] tz_sign [10] tz_hour [11] tz_minute
-
-  if (match[9]) {
-    tz_hour = +(match[10]);
-    tz_minute = +(match[11] || 0);
-    delta = (tz_hour * 60 + tz_minute) * 60000; // delta in mili-seconds
-    if (match[9] === '-') delta = -delta;
-  }
-
-  date = new Date(Date.UTC(year, month, day, hour, minute, second, fraction));
-
-  if (delta) date.setTime(date.getTime() - delta);
-
-  return date;
-}
-
-function representYamlTimestamp(object /*, style*/) {
-  return object.toISOString();
-}
-
-module.exports = new Type('tag:yaml.org,2002:timestamp', {
-  kind: 'scalar',
-  resolve: resolveYamlTimestamp,
-  construct: constructYamlTimestamp,
-  instanceOf: Date,
-  represent: representYamlTimestamp
-});
-
-
-/***/ }),
-
-/***/ 467:
-/***/ ((module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-function _interopDefault (ex) { return (ex && (typeof ex === 'object') && 'default' in ex) ? ex['default'] : ex; }
-
-var Stream = _interopDefault(__nccwpck_require__(2413));
-var http = _interopDefault(__nccwpck_require__(8605));
-var Url = _interopDefault(__nccwpck_require__(8835));
-var https = _interopDefault(__nccwpck_require__(7211));
-var zlib = _interopDefault(__nccwpck_require__(8761));
-
-// Based on https://github.com/tmpvar/jsdom/blob/aa85b2abf07766ff7bf5c1f6daafb3726f2f2db5/lib/jsdom/living/blob.js
-
-// fix for "Readable" isn't a named export issue
-const Readable = Stream.Readable;
-
-const BUFFER = Symbol('buffer');
-const TYPE = Symbol('type');
-
-class Blob {
-	constructor() {
-		this[TYPE] = '';
-
-		const blobParts = arguments[0];
-		const options = arguments[1];
-
-		const buffers = [];
-		let size = 0;
-
-		if (blobParts) {
-			const a = blobParts;
-			const length = Number(a.length);
-			for (let i = 0; i < length; i++) {
-				const element = a[i];
-				let buffer;
-				if (element instanceof Buffer) {
-					buffer = element;
-				} else if (ArrayBuffer.isView(element)) {
-					buffer = Buffer.from(element.buffer, element.byteOffset, element.byteLength);
-				} else if (element instanceof ArrayBuffer) {
-					buffer = Buffer.from(element);
-				} else if (element instanceof Blob) {
-					buffer = element[BUFFER];
-				} else {
-					buffer = Buffer.from(typeof element === 'string' ? element : String(element));
-				}
-				size += buffer.length;
-				buffers.push(buffer);
-			}
-		}
-
-		this[BUFFER] = Buffer.concat(buffers);
-
-		let type = options && options.type !== undefined && String(options.type).toLowerCase();
-		if (type && !/[^\u0020-\u007E]/.test(type)) {
-			this[TYPE] = type;
-		}
-	}
-	get size() {
-		return this[BUFFER].length;
-	}
-	get type() {
-		return this[TYPE];
-	}
-	text() {
-		return Promise.resolve(this[BUFFER].toString());
-	}
-	arrayBuffer() {
-		const buf = this[BUFFER];
-		const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-		return Promise.resolve(ab);
-	}
-	stream() {
-		const readable = new Readable();
-		readable._read = function () {};
-		readable.push(this[BUFFER]);
-		readable.push(null);
-		return readable;
-	}
-	toString() {
-		return '[object Blob]';
-	}
-	slice() {
-		const size = this.size;
-
-		const start = arguments[0];
-		const end = arguments[1];
-		let relativeStart, relativeEnd;
-		if (start === undefined) {
-			relativeStart = 0;
-		} else if (start < 0) {
-			relativeStart = Math.max(size + start, 0);
-		} else {
-			relativeStart = Math.min(start, size);
-		}
-		if (end === undefined) {
-			relativeEnd = size;
-		} else if (end < 0) {
-			relativeEnd = Math.max(size + end, 0);
-		} else {
-			relativeEnd = Math.min(end, size);
-		}
-		const span = Math.max(relativeEnd - relativeStart, 0);
-
-		const buffer = this[BUFFER];
-		const slicedBuffer = buffer.slice(relativeStart, relativeStart + span);
-		const blob = new Blob([], { type: arguments[2] });
-		blob[BUFFER] = slicedBuffer;
-		return blob;
-	}
-}
-
-Object.defineProperties(Blob.prototype, {
-	size: { enumerable: true },
-	type: { enumerable: true },
-	slice: { enumerable: true }
-});
-
-Object.defineProperty(Blob.prototype, Symbol.toStringTag, {
-	value: 'Blob',
-	writable: false,
-	enumerable: false,
-	configurable: true
-});
-
-/**
- * fetch-error.js
- *
- * FetchError interface for operational errors
- */
-
-/**
- * Create FetchError instance
- *
- * @param   String      message      Error message for human
- * @param   String      type         Error type for machine
- * @param   String      systemError  For Node.js system error
- * @return  FetchError
- */
-function FetchError(message, type, systemError) {
-  Error.call(this, message);
-
-  this.message = message;
-  this.type = type;
-
-  // when err.type is `system`, err.code contains system error code
-  if (systemError) {
-    this.code = this.errno = systemError.code;
-  }
-
-  // hide custom error implementation details from end-users
-  Error.captureStackTrace(this, this.constructor);
-}
-
-FetchError.prototype = Object.create(Error.prototype);
-FetchError.prototype.constructor = FetchError;
-FetchError.prototype.name = 'FetchError';
-
-let convert;
-try {
-	convert = __nccwpck_require__(2877).convert;
-} catch (e) {}
-
-const INTERNALS = Symbol('Body internals');
-
-// fix an issue where "PassThrough" isn't a named export for node <10
-const PassThrough = Stream.PassThrough;
-
-/**
- * Body mixin
- *
- * Ref: https://fetch.spec.whatwg.org/#body
- *
- * @param   Stream  body  Readable stream
- * @param   Object  opts  Response options
- * @return  Void
- */
-function Body(body) {
-	var _this = this;
-
-	var _ref = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {},
-	    _ref$size = _ref.size;
-
-	let size = _ref$size === undefined ? 0 : _ref$size;
-	var _ref$timeout = _ref.timeout;
-	let timeout = _ref$timeout === undefined ? 0 : _ref$timeout;
-
-	if (body == null) {
-		// body is undefined or null
-		body = null;
-	} else if (isURLSearchParams(body)) {
-		// body is a URLSearchParams
-		body = Buffer.from(body.toString());
-	} else if (isBlob(body)) ; else if (Buffer.isBuffer(body)) ; else if (Object.prototype.toString.call(body) === '[object ArrayBuffer]') {
-		// body is ArrayBuffer
-		body = Buffer.from(body);
-	} else if (ArrayBuffer.isView(body)) {
-		// body is ArrayBufferView
-		body = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
-	} else if (body instanceof Stream) ; else {
-		// none of the above
-		// coerce to string then buffer
-		body = Buffer.from(String(body));
-	}
-	this[INTERNALS] = {
-		body,
-		disturbed: false,
-		error: null
+/*! js-yaml 5.4.2 https://github.com/nodeca/js-yaml @license MIT */
+Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+//#region src/tag.ts
+/**
+* Returned by a scalar resolver when the source does not match its tag.
+*
+* @category Tags
+*/
+var NOT_RESOLVED = Symbol("NOT_RESOLVED");
+/**
+* Create a normalized scalar tag definition.
+*
+* @category Tags
+*/
+function defineScalarTag(tagName, options) {
+	var _options$implicit, _options$matchByTagPr, _options$implicitFirs, _options$represent, _options$representTag;
+	return {
+		tagName,
+		nodeKind: "scalar",
+		implicit: (_options$implicit = options.implicit) !== null && _options$implicit !== void 0 ? _options$implicit : false,
+		matchByTagPrefix: (_options$matchByTagPr = options.matchByTagPrefix) !== null && _options$matchByTagPr !== void 0 ? _options$matchByTagPr : false,
+		implicitFirstChars: (_options$implicitFirs = options.implicitFirstChars) !== null && _options$implicitFirs !== void 0 ? _options$implicitFirs : null,
+		resolve: options.resolve,
+		identify: options.identify,
+		represent: (_options$represent = options.represent) !== null && _options$represent !== void 0 ? _options$represent : ((data) => String(data)),
+		representTagName: (_options$representTag = options.representTagName) !== null && _options$representTag !== void 0 ? _options$representTag : (() => tagName)
 	};
-	this.size = size;
-	this.timeout = timeout;
-
-	if (body instanceof Stream) {
-		body.on('error', function (err) {
-			const error = err.name === 'AbortError' ? err : new FetchError(`Invalid response body while trying to fetch ${_this.url}: ${err.message}`, 'system', err);
-			_this[INTERNALS].error = error;
-		});
-	}
 }
-
-Body.prototype = {
-	get body() {
-		return this[INTERNALS].body;
-	},
-
-	get bodyUsed() {
-		return this[INTERNALS].disturbed;
-	},
-
-	/**
-  * Decode response as ArrayBuffer
-  *
-  * @return  Promise
-  */
-	arrayBuffer() {
-		return consumeBody.call(this).then(function (buf) {
-			return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-		});
-	},
-
-	/**
-  * Return raw response as Blob
-  *
-  * @return Promise
-  */
-	blob() {
-		let ct = this.headers && this.headers.get('content-type') || '';
-		return consumeBody.call(this).then(function (buf) {
-			return Object.assign(
-			// Prevent copying
-			new Blob([], {
-				type: ct.toLowerCase()
-			}), {
-				[BUFFER]: buf
-			});
-		});
-	},
-
-	/**
-  * Decode response as json
-  *
-  * @return  Promise
-  */
-	json() {
-		var _this2 = this;
-
-		return consumeBody.call(this).then(function (buffer) {
-			try {
-				return JSON.parse(buffer.toString());
-			} catch (err) {
-				return Body.Promise.reject(new FetchError(`invalid json response body at ${_this2.url} reason: ${err.message}`, 'invalid-json'));
-			}
-		});
-	},
-
-	/**
-  * Decode response as text
-  *
-  * @return  Promise
-  */
-	text() {
-		return consumeBody.call(this).then(function (buffer) {
-			return buffer.toString();
-		});
-	},
-
-	/**
-  * Decode response as buffer (non-spec api)
-  *
-  * @return  Promise
-  */
-	buffer() {
-		return consumeBody.call(this);
-	},
-
-	/**
-  * Decode response as text, while automatically detecting the encoding and
-  * trying to decode to UTF-8 (non-spec api)
-  *
-  * @return  Promise
-  */
-	textConverted() {
-		var _this3 = this;
-
-		return consumeBody.call(this).then(function (buffer) {
-			return convertBody(buffer, _this3.headers);
-		});
-	}
-};
-
-// In browsers, all properties are enumerable.
-Object.defineProperties(Body.prototype, {
-	body: { enumerable: true },
-	bodyUsed: { enumerable: true },
-	arrayBuffer: { enumerable: true },
-	blob: { enumerable: true },
-	json: { enumerable: true },
-	text: { enumerable: true }
-});
-
-Body.mixIn = function (proto) {
-	for (const name of Object.getOwnPropertyNames(Body.prototype)) {
-		// istanbul ignore else: future proof
-		if (!(name in proto)) {
-			const desc = Object.getOwnPropertyDescriptor(Body.prototype, name);
-			Object.defineProperty(proto, name, desc);
-		}
-	}
-};
-
 /**
- * Consume and convert an entire Body to a Buffer.
- *
- * Ref: https://fetch.spec.whatwg.org/#concept-body-consume-body
- *
- * @return  Promise
- */
-function consumeBody() {
-	var _this4 = this;
-
-	if (this[INTERNALS].disturbed) {
-		return Body.Promise.reject(new TypeError(`body used already for: ${this.url}`));
-	}
-
-	this[INTERNALS].disturbed = true;
-
-	if (this[INTERNALS].error) {
-		return Body.Promise.reject(this[INTERNALS].error);
-	}
-
-	let body = this.body;
-
-	// body is null
-	if (body === null) {
-		return Body.Promise.resolve(Buffer.alloc(0));
-	}
-
-	// body is blob
-	if (isBlob(body)) {
-		body = body.stream();
-	}
-
-	// body is buffer
-	if (Buffer.isBuffer(body)) {
-		return Body.Promise.resolve(body);
-	}
-
-	// istanbul ignore if: should never happen
-	if (!(body instanceof Stream)) {
-		return Body.Promise.resolve(Buffer.alloc(0));
-	}
-
-	// body is stream
-	// get ready to actually consume the body
-	let accum = [];
-	let accumBytes = 0;
-	let abort = false;
-
-	return new Body.Promise(function (resolve, reject) {
-		let resTimeout;
-
-		// allow timeout on slow response body
-		if (_this4.timeout) {
-			resTimeout = setTimeout(function () {
-				abort = true;
-				reject(new FetchError(`Response timeout while trying to fetch ${_this4.url} (over ${_this4.timeout}ms)`, 'body-timeout'));
-			}, _this4.timeout);
-		}
-
-		// handle stream errors
-		body.on('error', function (err) {
-			if (err.name === 'AbortError') {
-				// if the request was aborted, reject with this Error
-				abort = true;
-				reject(err);
-			} else {
-				// other errors, such as incorrect content-encoding
-				reject(new FetchError(`Invalid response body while trying to fetch ${_this4.url}: ${err.message}`, 'system', err));
-			}
-		});
-
-		body.on('data', function (chunk) {
-			if (abort || chunk === null) {
-				return;
-			}
-
-			if (_this4.size && accumBytes + chunk.length > _this4.size) {
-				abort = true;
-				reject(new FetchError(`content size at ${_this4.url} over limit: ${_this4.size}`, 'max-size'));
-				return;
-			}
-
-			accumBytes += chunk.length;
-			accum.push(chunk);
-		});
-
-		body.on('end', function () {
-			if (abort) {
-				return;
-			}
-
-			clearTimeout(resTimeout);
-
-			try {
-				resolve(Buffer.concat(accum, accumBytes));
-			} catch (err) {
-				// handle streams that have accumulated too much data (issue #414)
-				reject(new FetchError(`Could not create Buffer from response body for ${_this4.url}: ${err.message}`, 'system', err));
-			}
-		});
-	});
-}
-
-/**
- * Detect buffer encoding and convert to target encoding
- * ref: http://www.w3.org/TR/2011/WD-html5-20110113/parsing.html#determining-the-character-encoding
- *
- * @param   Buffer  buffer    Incoming buffer
- * @param   String  encoding  Target encoding
- * @return  String
- */
-function convertBody(buffer, headers) {
-	if (typeof convert !== 'function') {
-		throw new Error('The package `encoding` must be installed to use the textConverted() function');
-	}
-
-	const ct = headers.get('content-type');
-	let charset = 'utf-8';
-	let res, str;
-
-	// header
-	if (ct) {
-		res = /charset=([^;]*)/i.exec(ct);
-	}
-
-	// no charset in content type, peek at response body for at most 1024 bytes
-	str = buffer.slice(0, 1024).toString();
-
-	// html5
-	if (!res && str) {
-		res = /<meta.+?charset=(['"])(.+?)\1/i.exec(str);
-	}
-
-	// html4
-	if (!res && str) {
-		res = /<meta[\s]+?http-equiv=(['"])content-type\1[\s]+?content=(['"])(.+?)\2/i.exec(str);
-		if (!res) {
-			res = /<meta[\s]+?content=(['"])(.+?)\1[\s]+?http-equiv=(['"])content-type\3/i.exec(str);
-			if (res) {
-				res.pop(); // drop last quote
-			}
-		}
-
-		if (res) {
-			res = /charset=(.*)/i.exec(res.pop());
-		}
-	}
-
-	// xml
-	if (!res && str) {
-		res = /<\?xml.+?encoding=(['"])(.+?)\1/i.exec(str);
-	}
-
-	// found charset
-	if (res) {
-		charset = res.pop();
-
-		// prevent decode issues when sites use incorrect encoding
-		// ref: https://hsivonen.fi/encoding-menu/
-		if (charset === 'gb2312' || charset === 'gbk') {
-			charset = 'gb18030';
-		}
-	}
-
-	// turn raw buffers into a single utf-8 buffer
-	return convert(buffer, 'UTF-8', charset).toString();
-}
-
-/**
- * Detect a URLSearchParams object
- * ref: https://github.com/bitinn/node-fetch/issues/296#issuecomment-307598143
- *
- * @param   Object  obj     Object to detect by type or brand
- * @return  String
- */
-function isURLSearchParams(obj) {
-	// Duck-typing as a necessary condition.
-	if (typeof obj !== 'object' || typeof obj.append !== 'function' || typeof obj.delete !== 'function' || typeof obj.get !== 'function' || typeof obj.getAll !== 'function' || typeof obj.has !== 'function' || typeof obj.set !== 'function') {
-		return false;
-	}
-
-	// Brand-checking and more duck-typing as optional condition.
-	return obj.constructor.name === 'URLSearchParams' || Object.prototype.toString.call(obj) === '[object URLSearchParams]' || typeof obj.sort === 'function';
-}
-
-/**
- * Check if `obj` is a W3C `Blob` object (which `File` inherits from)
- * @param  {*} obj
- * @return {boolean}
- */
-function isBlob(obj) {
-	return typeof obj === 'object' && typeof obj.arrayBuffer === 'function' && typeof obj.type === 'string' && typeof obj.stream === 'function' && typeof obj.constructor === 'function' && typeof obj.constructor.name === 'string' && /^(Blob|File)$/.test(obj.constructor.name) && /^(Blob|File)$/.test(obj[Symbol.toStringTag]);
-}
-
-/**
- * Clone body given Res/Req instance
- *
- * @param   Mixed  instance  Response or Request instance
- * @return  Mixed
- */
-function clone(instance) {
-	let p1, p2;
-	let body = instance.body;
-
-	// don't allow cloning a used body
-	if (instance.bodyUsed) {
-		throw new Error('cannot clone body after it is used');
-	}
-
-	// check that body is a stream and not form-data object
-	// note: we can't clone the form-data object without having it as a dependency
-	if (body instanceof Stream && typeof body.getBoundary !== 'function') {
-		// tee instance body
-		p1 = new PassThrough();
-		p2 = new PassThrough();
-		body.pipe(p1);
-		body.pipe(p2);
-		// set instance body to teed body and return the other teed body
-		instance[INTERNALS].body = p1;
-		body = p2;
-	}
-
-	return body;
-}
-
-/**
- * Performs the operation "extract a `Content-Type` value from |object|" as
- * specified in the specification:
- * https://fetch.spec.whatwg.org/#concept-bodyinit-extract
- *
- * This function assumes that instance.body is present.
- *
- * @param   Mixed  instance  Any options.body input
- */
-function extractContentType(body) {
-	if (body === null) {
-		// body is null
-		return null;
-	} else if (typeof body === 'string') {
-		// body is string
-		return 'text/plain;charset=UTF-8';
-	} else if (isURLSearchParams(body)) {
-		// body is a URLSearchParams
-		return 'application/x-www-form-urlencoded;charset=UTF-8';
-	} else if (isBlob(body)) {
-		// body is blob
-		return body.type || null;
-	} else if (Buffer.isBuffer(body)) {
-		// body is buffer
-		return null;
-	} else if (Object.prototype.toString.call(body) === '[object ArrayBuffer]') {
-		// body is ArrayBuffer
-		return null;
-	} else if (ArrayBuffer.isView(body)) {
-		// body is ArrayBufferView
-		return null;
-	} else if (typeof body.getBoundary === 'function') {
-		// detect form data input from form-data module
-		return `multipart/form-data;boundary=${body.getBoundary()}`;
-	} else if (body instanceof Stream) {
-		// body is stream
-		// can't really do much about this
-		return null;
-	} else {
-		// Body constructor defaults other things to string
-		return 'text/plain;charset=UTF-8';
-	}
-}
-
-/**
- * The Fetch Standard treats this as if "total bytes" is a property on the body.
- * For us, we have to explicitly get it with a function.
- *
- * ref: https://fetch.spec.whatwg.org/#concept-body-total-bytes
- *
- * @param   Body    instance   Instance of Body
- * @return  Number?            Number of bytes, or null if not possible
- */
-function getTotalBytes(instance) {
-	const body = instance.body;
-
-
-	if (body === null) {
-		// body is null
-		return 0;
-	} else if (isBlob(body)) {
-		return body.size;
-	} else if (Buffer.isBuffer(body)) {
-		// body is buffer
-		return body.length;
-	} else if (body && typeof body.getLengthSync === 'function') {
-		// detect form data input from form-data module
-		if (body._lengthRetrievers && body._lengthRetrievers.length == 0 || // 1.x
-		body.hasKnownLength && body.hasKnownLength()) {
-			// 2.x
-			return body.getLengthSync();
-		}
-		return null;
-	} else {
-		// body is stream
-		return null;
-	}
-}
-
-/**
- * Write a Body to a Node.js WritableStream (e.g. http.Request) object.
- *
- * @param   Body    instance   Instance of Body
- * @return  Void
- */
-function writeToStream(dest, instance) {
-	const body = instance.body;
-
-
-	if (body === null) {
-		// body is null
-		dest.end();
-	} else if (isBlob(body)) {
-		body.stream().pipe(dest);
-	} else if (Buffer.isBuffer(body)) {
-		// body is buffer
-		dest.write(body);
-		dest.end();
-	} else {
-		// body is stream
-		body.pipe(dest);
-	}
-}
-
-// expose Promise
-Body.Promise = global.Promise;
-
-/**
- * headers.js
- *
- * Headers class offers convenient helpers
- */
-
-const invalidTokenRegex = /[^\^_`a-zA-Z\-0-9!#$%&'*+.|~]/;
-const invalidHeaderCharRegex = /[^\t\x20-\x7e\x80-\xff]/;
-
-function validateName(name) {
-	name = `${name}`;
-	if (invalidTokenRegex.test(name) || name === '') {
-		throw new TypeError(`${name} is not a legal HTTP header name`);
-	}
-}
-
-function validateValue(value) {
-	value = `${value}`;
-	if (invalidHeaderCharRegex.test(value)) {
-		throw new TypeError(`${value} is not a legal HTTP header value`);
-	}
-}
-
-/**
- * Find the key in the map object given a header name.
- *
- * Returns undefined if not found.
- *
- * @param   String  name  Header name
- * @return  String|Undefined
- */
-function find(map, name) {
-	name = name.toLowerCase();
-	for (const key in map) {
-		if (key.toLowerCase() === name) {
-			return key;
-		}
-	}
-	return undefined;
-}
-
-const MAP = Symbol('map');
-class Headers {
-	/**
-  * Headers class
-  *
-  * @param   Object  headers  Response headers
-  * @return  Void
-  */
-	constructor() {
-		let init = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : undefined;
-
-		this[MAP] = Object.create(null);
-
-		if (init instanceof Headers) {
-			const rawHeaders = init.raw();
-			const headerNames = Object.keys(rawHeaders);
-
-			for (const headerName of headerNames) {
-				for (const value of rawHeaders[headerName]) {
-					this.append(headerName, value);
-				}
-			}
-
-			return;
-		}
-
-		// We don't worry about converting prop to ByteString here as append()
-		// will handle it.
-		if (init == null) ; else if (typeof init === 'object') {
-			const method = init[Symbol.iterator];
-			if (method != null) {
-				if (typeof method !== 'function') {
-					throw new TypeError('Header pairs must be iterable');
-				}
-
-				// sequence<sequence<ByteString>>
-				// Note: per spec we have to first exhaust the lists then process them
-				const pairs = [];
-				for (const pair of init) {
-					if (typeof pair !== 'object' || typeof pair[Symbol.iterator] !== 'function') {
-						throw new TypeError('Each header pair must be iterable');
-					}
-					pairs.push(Array.from(pair));
-				}
-
-				for (const pair of pairs) {
-					if (pair.length !== 2) {
-						throw new TypeError('Each header pair must be a name/value tuple');
-					}
-					this.append(pair[0], pair[1]);
-				}
-			} else {
-				// record<ByteString, ByteString>
-				for (const key of Object.keys(init)) {
-					const value = init[key];
-					this.append(key, value);
-				}
-			}
-		} else {
-			throw new TypeError('Provided initializer must be an object');
-		}
-	}
-
-	/**
-  * Return combined header value given name
-  *
-  * @param   String  name  Header name
-  * @return  Mixed
-  */
-	get(name) {
-		name = `${name}`;
-		validateName(name);
-		const key = find(this[MAP], name);
-		if (key === undefined) {
-			return null;
-		}
-
-		return this[MAP][key].join(', ');
-	}
-
-	/**
-  * Iterate over all headers
-  *
-  * @param   Function  callback  Executed for each item with parameters (value, name, thisArg)
-  * @param   Boolean   thisArg   `this` context for callback function
-  * @return  Void
-  */
-	forEach(callback) {
-		let thisArg = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : undefined;
-
-		let pairs = getHeaders(this);
-		let i = 0;
-		while (i < pairs.length) {
-			var _pairs$i = pairs[i];
-			const name = _pairs$i[0],
-			      value = _pairs$i[1];
-
-			callback.call(thisArg, value, name, this);
-			pairs = getHeaders(this);
-			i++;
-		}
-	}
-
-	/**
-  * Overwrite header values given name
-  *
-  * @param   String  name   Header name
-  * @param   String  value  Header value
-  * @return  Void
-  */
-	set(name, value) {
-		name = `${name}`;
-		value = `${value}`;
-		validateName(name);
-		validateValue(value);
-		const key = find(this[MAP], name);
-		this[MAP][key !== undefined ? key : name] = [value];
-	}
-
-	/**
-  * Append a value onto existing header
-  *
-  * @param   String  name   Header name
-  * @param   String  value  Header value
-  * @return  Void
-  */
-	append(name, value) {
-		name = `${name}`;
-		value = `${value}`;
-		validateName(name);
-		validateValue(value);
-		const key = find(this[MAP], name);
-		if (key !== undefined) {
-			this[MAP][key].push(value);
-		} else {
-			this[MAP][name] = [value];
-		}
-	}
-
-	/**
-  * Check for header name existence
-  *
-  * @param   String   name  Header name
-  * @return  Boolean
-  */
-	has(name) {
-		name = `${name}`;
-		validateName(name);
-		return find(this[MAP], name) !== undefined;
-	}
-
-	/**
-  * Delete all header values given name
-  *
-  * @param   String  name  Header name
-  * @return  Void
-  */
-	delete(name) {
-		name = `${name}`;
-		validateName(name);
-		const key = find(this[MAP], name);
-		if (key !== undefined) {
-			delete this[MAP][key];
-		}
-	}
-
-	/**
-  * Return raw headers (non-spec api)
-  *
-  * @return  Object
-  */
-	raw() {
-		return this[MAP];
-	}
-
-	/**
-  * Get an iterator on keys.
-  *
-  * @return  Iterator
-  */
-	keys() {
-		return createHeadersIterator(this, 'key');
-	}
-
-	/**
-  * Get an iterator on values.
-  *
-  * @return  Iterator
-  */
-	values() {
-		return createHeadersIterator(this, 'value');
-	}
-
-	/**
-  * Get an iterator on entries.
-  *
-  * This is the default iterator of the Headers object.
-  *
-  * @return  Iterator
-  */
-	[Symbol.iterator]() {
-		return createHeadersIterator(this, 'key+value');
-	}
-}
-Headers.prototype.entries = Headers.prototype[Symbol.iterator];
-
-Object.defineProperty(Headers.prototype, Symbol.toStringTag, {
-	value: 'Headers',
-	writable: false,
-	enumerable: false,
-	configurable: true
-});
-
-Object.defineProperties(Headers.prototype, {
-	get: { enumerable: true },
-	forEach: { enumerable: true },
-	set: { enumerable: true },
-	append: { enumerable: true },
-	has: { enumerable: true },
-	delete: { enumerable: true },
-	keys: { enumerable: true },
-	values: { enumerable: true },
-	entries: { enumerable: true }
-});
-
-function getHeaders(headers) {
-	let kind = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : 'key+value';
-
-	const keys = Object.keys(headers[MAP]).sort();
-	return keys.map(kind === 'key' ? function (k) {
-		return k.toLowerCase();
-	} : kind === 'value' ? function (k) {
-		return headers[MAP][k].join(', ');
-	} : function (k) {
-		return [k.toLowerCase(), headers[MAP][k].join(', ')];
-	});
-}
-
-const INTERNAL = Symbol('internal');
-
-function createHeadersIterator(target, kind) {
-	const iterator = Object.create(HeadersIteratorPrototype);
-	iterator[INTERNAL] = {
-		target,
-		kind,
-		index: 0
+* Create a normalized sequence tag definition.
+*
+* @category Tags
+*/
+function defineSequenceTag(tagName, options) {
+	var _options$matchByTagPr2, _options$finalize, _options$represent2, _options$representTag2;
+	const carrierIsResult = options.finalize === void 0;
+	return {
+		tagName,
+		nodeKind: "sequence",
+		implicit: false,
+		matchByTagPrefix: (_options$matchByTagPr2 = options.matchByTagPrefix) !== null && _options$matchByTagPr2 !== void 0 ? _options$matchByTagPr2 : false,
+		create: options.create,
+		addItem: options.addItem,
+		finalize: (_options$finalize = options.finalize) !== null && _options$finalize !== void 0 ? _options$finalize : ((carrier) => carrier),
+		carrierIsResult,
+		identify: options.identify,
+		represent: (_options$represent2 = options.represent) !== null && _options$represent2 !== void 0 ? _options$represent2 : ((data) => data),
+		representTagName: (_options$representTag2 = options.representTagName) !== null && _options$representTag2 !== void 0 ? _options$representTag2 : (() => tagName)
 	};
-	return iterator;
 }
-
-const HeadersIteratorPrototype = Object.setPrototypeOf({
-	next() {
-		// istanbul ignore if
-		if (!this || Object.getPrototypeOf(this) !== HeadersIteratorPrototype) {
-			throw new TypeError('Value of `this` is not a HeadersIterator');
+/**
+* Create a normalized mapping tag definition.
+*
+* @category Tags
+*/
+function defineMappingTag(tagName, options) {
+	var _options$matchByTagPr3, _options$finalize2, _options$represent3, _options$representTag3;
+	const carrierIsResult = options.finalize === void 0;
+	return {
+		tagName,
+		nodeKind: "mapping",
+		implicit: false,
+		matchByTagPrefix: (_options$matchByTagPr3 = options.matchByTagPrefix) !== null && _options$matchByTagPr3 !== void 0 ? _options$matchByTagPr3 : false,
+		create: options.create,
+		addPair: options.addPair,
+		has: options.has,
+		keys: options.keys,
+		get: options.get,
+		finalize: (_options$finalize2 = options.finalize) !== null && _options$finalize2 !== void 0 ? _options$finalize2 : ((carrier) => carrier),
+		carrierIsResult,
+		identify: options.identify,
+		represent: (_options$represent3 = options.represent) !== null && _options$represent3 !== void 0 ? _options$represent3 : ((data) => data),
+		representTagName: (_options$representTag3 = options.representTagName) !== null && _options$representTag3 !== void 0 ? _options$representTag3 : (() => tagName)
+	};
+}
+//#endregion
+//#region src/tag/scalar/str.ts
+/** @category Tags */
+var strTag = defineScalarTag("tag:yaml.org,2002:str", {
+	resolve: (source) => source,
+	identify: (data) => typeof data === "string"
+});
+//#endregion
+//#region src/tag/scalar/null_core.ts
+var NULL_VALUES$1 = [
+	"",
+	"~",
+	"null",
+	"Null",
+	"NULL"
+];
+/** @category Tags */
+var nullCoreTag = defineScalarTag("tag:yaml.org,2002:null", {
+	implicit: true,
+	implicitFirstChars: [
+		"",
+		"~",
+		"n",
+		"N"
+	],
+	resolve: (source) => {
+		if (NULL_VALUES$1.indexOf(source) !== -1) return null;
+		return NOT_RESOLVED;
+	},
+	identify: (object) => object === null,
+	represent: () => "null"
+});
+//#endregion
+//#region src/tag/scalar/null_json.ts
+/** @category Tags */
+var nullJsonTag = defineScalarTag("tag:yaml.org,2002:null", {
+	implicit: true,
+	implicitFirstChars: ["n"],
+	resolve: (source, isExplicit) => {
+		if (source === "null" || isExplicit && source === "") return null;
+		return NOT_RESOLVED;
+	},
+	identify: (object) => object === null,
+	represent: () => "null"
+});
+//#endregion
+//#region src/tag/scalar/null_yaml11.ts
+var NULL_VALUES = [
+	"",
+	"~",
+	"null",
+	"Null",
+	"NULL"
+];
+/** @category Tags */
+var nullYaml11Tag = defineScalarTag("tag:yaml.org,2002:null", {
+	implicit: true,
+	implicitFirstChars: [
+		"",
+		"~",
+		"n",
+		"N"
+	],
+	resolve: (source) => {
+		if (NULL_VALUES.indexOf(source) !== -1) return null;
+		return NOT_RESOLVED;
+	},
+	identify: (object) => object === null,
+	represent: () => "null"
+});
+//#endregion
+//#region src/tag/scalar/bool_core.ts
+var TRUE_VALUES$2 = [
+	"true",
+	"True",
+	"TRUE"
+];
+var FALSE_VALUES$2 = [
+	"false",
+	"False",
+	"FALSE"
+];
+/** @category Tags */
+var boolCoreTag = defineScalarTag("tag:yaml.org,2002:bool", {
+	implicit: true,
+	implicitFirstChars: [
+		"t",
+		"T",
+		"f",
+		"F"
+	],
+	resolve: (source) => {
+		if (TRUE_VALUES$2.indexOf(source) !== -1) return true;
+		if (FALSE_VALUES$2.indexOf(source) !== -1) return false;
+		return NOT_RESOLVED;
+	},
+	identify: (object) => Object.prototype.toString.call(object) === "[object Boolean]",
+	represent: (object) => object ? "true" : "false"
+});
+//#endregion
+//#region src/tag/scalar/bool_json.ts
+var TRUE_VALUES$1 = ["true"];
+var FALSE_VALUES$1 = ["false"];
+/** @category Tags */
+var boolJsonTag = defineScalarTag("tag:yaml.org,2002:bool", {
+	implicit: true,
+	implicitFirstChars: ["t", "f"],
+	resolve: (source) => {
+		if (TRUE_VALUES$1.indexOf(source) !== -1) return true;
+		if (FALSE_VALUES$1.indexOf(source) !== -1) return false;
+		return NOT_RESOLVED;
+	},
+	identify: (object) => Object.prototype.toString.call(object) === "[object Boolean]",
+	represent: (object) => object ? "true" : "false"
+});
+//#endregion
+//#region src/tag/scalar/bool_yaml11.ts
+var TRUE_VALUES = [
+	"true",
+	"True",
+	"TRUE",
+	"y",
+	"Y",
+	"yes",
+	"Yes",
+	"YES",
+	"on",
+	"On",
+	"ON"
+];
+var FALSE_VALUES = [
+	"false",
+	"False",
+	"FALSE",
+	"n",
+	"N",
+	"no",
+	"No",
+	"NO",
+	"off",
+	"Off",
+	"OFF"
+];
+/** @category Tags */
+var boolYaml11Tag = defineScalarTag("tag:yaml.org,2002:bool", {
+	implicit: true,
+	implicitFirstChars: [
+		"y",
+		"Y",
+		"n",
+		"N",
+		"t",
+		"T",
+		"f",
+		"F",
+		"o",
+		"O"
+	],
+	resolve: (source) => {
+		if (TRUE_VALUES.indexOf(source) !== -1) return true;
+		if (FALSE_VALUES.indexOf(source) !== -1) return false;
+		return NOT_RESOLVED;
+	},
+	identify: (object) => Object.prototype.toString.call(object) === "[object Boolean]",
+	represent: (object) => object ? "true" : "false"
+});
+//#endregion
+//#region src/tag/scalar/int_core.ts
+var YAML_INTEGER_IMPLICIT_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:0o[0-7]+|0x[0-9a-fA-F]+|[-+]?[0-9]+)$");
+var YAML_INTEGER_EXPLICIT_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:[-+]?0b[0-1]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+|[-+]?[0-9]+)$");
+function parseYamlInteger$2(source) {
+	let value = source;
+	let sign = 1;
+	if (value[0] === "-" || value[0] === "+") {
+		if (value[0] === "-") sign = -1;
+		value = value.slice(1);
+	}
+	if (value.startsWith("0b")) return sign * parseInt(value.slice(2), 2);
+	if (value.startsWith("0o")) return sign * parseInt(value.slice(2), 8);
+	if (value.startsWith("0x")) return sign * parseInt(value.slice(2), 16);
+	return sign * parseInt(value, 10);
+}
+function resolveYamlInteger$2(source, isExplicit) {
+	if (isExplicit) {
+		if (!YAML_INTEGER_EXPLICIT_PATTERN$1.test(source)) return NOT_RESOLVED;
+	} else if (!YAML_INTEGER_IMPLICIT_PATTERN$1.test(source)) return NOT_RESOLVED;
+	const result = parseYamlInteger$2(source);
+	return Number.isFinite(result) ? result : NOT_RESOLVED;
+}
+/** @category Tags */
+var intCoreTag = defineScalarTag("tag:yaml.org,2002:int", {
+	implicit: true,
+	implicitFirstChars: [
+		"-",
+		"+",
+		..."0123456789"
+	],
+	resolve: resolveYamlInteger$2,
+	identify: (object) => Number.isInteger(object) && !Object.is(object, -0) && object.toString(10).indexOf("e") < 0,
+	represent: (object) => object.toString(10)
+});
+//#endregion
+//#region src/tag/scalar/int_json.ts
+var YAML_INTEGER_IMPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^-?(?:0|[1-9][0-9]*)$");
+var YAML_INTEGER_EXPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?0b[0-1]+|[-+]?0o[0-7]+|[-+]?0x[0-9a-fA-F]+|[-+]?[0-9]+)$");
+function parseYamlInteger$1(source) {
+	let value = source;
+	let sign = 1;
+	if (value[0] === "-" || value[0] === "+") {
+		if (value[0] === "-") sign = -1;
+		value = value.slice(1);
+	}
+	if (value.startsWith("0b")) return sign * parseInt(value.slice(2), 2);
+	if (value.startsWith("0o")) return sign * parseInt(value.slice(2), 8);
+	if (value.startsWith("0x")) return sign * parseInt(value.slice(2), 16);
+	return sign * parseInt(value, 10);
+}
+function resolveYamlInteger$1(source, isExplicit) {
+	if (isExplicit) {
+		if (!YAML_INTEGER_EXPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
+	} else if (!YAML_INTEGER_IMPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
+	const result = parseYamlInteger$1(source);
+	return Number.isFinite(result) ? result : NOT_RESOLVED;
+}
+/** @category Tags */
+var intJsonTag = defineScalarTag("tag:yaml.org,2002:int", {
+	implicit: true,
+	implicitFirstChars: ["-", ..."0123456789"],
+	resolve: resolveYamlInteger$1,
+	identify: (object) => Number.isInteger(object) && !Object.is(object, -0) && object.toString(10).indexOf("e") < 0,
+	represent: (object) => object.toString(10)
+});
+//#endregion
+//#region src/tag/scalar/int_yaml11.ts
+var YAML_INTEGER_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?0x[0-9a-fA-F_]+|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+|[-+]?(?:0|[1-9][0-9_]*))$");
+function parseYamlInteger(source) {
+	let value = source.replace(/_/g, "");
+	let sign = 1;
+	if (value[0] === "-" || value[0] === "+") {
+		if (value[0] === "-") sign = -1;
+		value = value.slice(1);
+	}
+	if (value.startsWith("0b")) return sign * parseInt(value.slice(2), 2);
+	if (value.startsWith("0x")) return sign * parseInt(value.slice(2), 16);
+	if (value.includes(":")) {
+		let result = 0;
+		for (const part of value.split(":")) result = result * 60 + Number(part);
+		return sign * result;
+	}
+	if (value !== "0" && value[0] === "0") return sign * parseInt(value, 8);
+	return sign * parseInt(value, 10);
+}
+function resolveYamlInteger(source) {
+	if (!YAML_INTEGER_PATTERN.test(source)) return NOT_RESOLVED;
+	const result = parseYamlInteger(source);
+	return Number.isFinite(result) ? result : NOT_RESOLVED;
+}
+/** @category Tags */
+var intYaml11Tag = defineScalarTag("tag:yaml.org,2002:int", {
+	implicit: true,
+	implicitFirstChars: [
+		"-",
+		"+",
+		..."0123456789"
+	],
+	resolve: resolveYamlInteger,
+	identify: (object) => Number.isInteger(object) && !Object.is(object, -0) && object.toString(10).indexOf("e") < 0,
+	represent: (object) => object.toString(10)
+});
+//#endregion
+//#region src/tag/scalar/float_core.ts
+var YAML_FLOAT_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:[-+]?[0-9]+(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?|[-+]?\\.[0-9]+(?:[eE][-+]?[0-9]+)?|[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+var YAML_FLOAT_SPECIAL_PATTERN$1 = /* @__PURE__ */ new RegExp("^(?:[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+function resolveYamlFloat$2(source) {
+	if (!YAML_FLOAT_PATTERN$1.test(source)) return NOT_RESOLVED;
+	let value = source.toLowerCase();
+	const sign = value[0] === "-" ? -1 : 1;
+	if ("+-".includes(value[0])) value = value.slice(1);
+	if (value === ".inf") return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+	if (value === ".nan") return NaN;
+	const result = sign * parseFloat(value);
+	if (Number.isFinite(result) || YAML_FLOAT_SPECIAL_PATTERN$1.test(source)) return result;
+	return NOT_RESOLVED;
+}
+function representYamlFloat$2(object) {
+	if (isNaN(object)) return ".nan";
+	if (object === Number.POSITIVE_INFINITY) return ".inf";
+	if (object === Number.NEGATIVE_INFINITY) return "-.inf";
+	if (Object.is(object, -0)) return "-0.0";
+	const result = object.toString(10);
+	return /^[-+]?[0-9]+e/.test(result) ? result.replace("e", ".e") : result;
+}
+/** @category Tags */
+var floatCoreTag = defineScalarTag("tag:yaml.org,2002:float", {
+	implicit: true,
+	implicitFirstChars: [
+		"-",
+		"+",
+		".",
+		..."0123456789"
+	],
+	resolve: resolveYamlFloat$2,
+	identify: (object) => typeof object === "number" && (!Number.isInteger(object) || Object.is(object, -0) || object.toString(10).indexOf("e") >= 0),
+	represent: representYamlFloat$2
+});
+//#endregion
+//#region src/tag/scalar/float_json.ts
+var YAML_FLOAT_IMPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?$");
+var YAML_FLOAT_EXPLICIT_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?[0-9]+(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?|[-+]?\\.[0-9]+(?:[eE][-+]?[0-9]+)?|[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+function resolveYamlFloat$1(source, isExplicit) {
+	if (isExplicit) {
+		if (!YAML_FLOAT_EXPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
+		let value = source.toLowerCase();
+		const sign = value[0] === "-" ? -1 : 1;
+		if ("+-".includes(value[0])) value = value.slice(1);
+		if (value === ".inf") return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+		if (value === ".nan") return NaN;
+		const result = sign * parseFloat(value);
+		return Number.isFinite(result) ? result : NOT_RESOLVED;
+	}
+	if (!YAML_FLOAT_IMPLICIT_PATTERN.test(source)) return NOT_RESOLVED;
+	const result = Number(source);
+	if (Number.isFinite(result)) return result;
+	return NOT_RESOLVED;
+}
+function representYamlFloat$1(object) {
+	if (isNaN(object)) return ".nan";
+	if (object === Number.POSITIVE_INFINITY) return ".inf";
+	if (object === Number.NEGATIVE_INFINITY) return "-.inf";
+	if (Object.is(object, -0)) return "-0.0";
+	const result = object.toString(10);
+	return /^[-+]?[0-9]+e/.test(result) ? result.replace("e", ".e") : result;
+}
+/** @category Tags */
+var floatJsonTag = defineScalarTag("tag:yaml.org,2002:float", {
+	implicit: true,
+	implicitFirstChars: ["-", ..."0123456789"],
+	resolve: resolveYamlFloat$1,
+	identify: (object) => typeof object === "number" && (!Number.isInteger(object) || Object.is(object, -0) || object.toString(10).indexOf("e") >= 0),
+	represent: representYamlFloat$1
+});
+//#endregion
+//#region src/tag/scalar/float_yaml11.ts
+var YAML_FLOAT_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?(?:(?:[0-9][0-9_]*)?\\.[0-9_]*)(?:[eE][-+][0-9]+)?|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*|[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+var YAML_FLOAT_SPECIAL_PATTERN = /* @__PURE__ */ new RegExp("^(?:[-+]?\\.(?:inf|Inf|INF)|\\.(?:nan|NaN|NAN))$");
+function resolveYamlFloat(source) {
+	if (!YAML_FLOAT_PATTERN.test(source)) return NOT_RESOLVED;
+	let value = source.toLowerCase().replace(/_/g, "");
+	const sign = value[0] === "-" ? -1 : 1;
+	if ("+-".includes(value[0])) value = value.slice(1);
+	if (value === ".inf") return sign === 1 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+	if (value === ".nan") return NaN;
+	let result = 0;
+	if (value.includes(":")) {
+		for (const part of value.split(":")) result = result * 60 + Number(part);
+		result *= sign;
+	} else result = sign * parseFloat(value);
+	if (Number.isFinite(result) || YAML_FLOAT_SPECIAL_PATTERN.test(source)) return result;
+	return NOT_RESOLVED;
+}
+function representYamlFloat(object) {
+	if (isNaN(object)) return ".nan";
+	if (object === Number.POSITIVE_INFINITY) return ".inf";
+	if (object === Number.NEGATIVE_INFINITY) return "-.inf";
+	if (Object.is(object, -0)) return "-0.0";
+	const result = object.toString(10);
+	return /^[-+]?[0-9]+e/.test(result) ? result.replace("e", ".e") : result;
+}
+/** @category Tags */
+var floatYaml11Tag = defineScalarTag("tag:yaml.org,2002:float", {
+	implicit: true,
+	implicitFirstChars: [
+		"-",
+		"+",
+		".",
+		..."0123456789"
+	],
+	resolve: resolveYamlFloat,
+	identify: (object) => typeof object === "number" && (!Number.isInteger(object) || Object.is(object, -0) || object.toString(10).indexOf("e") >= 0),
+	represent: representYamlFloat
+});
+//#endregion
+//#region src/tag/scalar/merge.ts
+/**
+* Enables merge keys in {@link CORE_SCHEMA} when added with
+* {@link Schema.withTags}.
+*
+* @category Tags
+*/
+var mergeTag = defineScalarTag("tag:yaml.org,2002:merge", {
+	implicit: true,
+	implicitFirstChars: ["<"],
+	resolve: (source, isExplicit) => {
+		if (source === "<<" || isExplicit && source === "") return "<<";
+		return NOT_RESOLVED;
+	},
+	identify: () => false
+});
+//#endregion
+//#region src/tag/scalar/binary.ts
+var BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+function resolveYamlBinary(source) {
+	const input = source.replace(/\s/g, "");
+	if (input.length % 4 !== 0 || !BASE64_PATTERN.test(input)) return NOT_RESOLVED;
+	const binary = atob(input);
+	const result = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index++) result[index] = binary.charCodeAt(index);
+	return result;
+}
+function representYamlBinary(object) {
+	let binary = "";
+	for (let index = 0; index < object.length; index++) binary += String.fromCharCode(object[index]);
+	return btoa(binary);
+}
+/**
+* The `!!binary` tag, represented as a `Uint8Array`.
+*
+* @category Tags
+*/
+var binaryTag = defineScalarTag("tag:yaml.org,2002:binary", {
+	resolve: resolveYamlBinary,
+	identify: (object) => Object.prototype.toString.call(object) === "[object Uint8Array]",
+	represent: representYamlBinary
+});
+//#endregion
+//#region src/tag/scalar/timestamp.ts
+var YAML_DATE_REGEXP = /* @__PURE__ */ new RegExp("^([0-9][0-9][0-9][0-9])-([0-9][0-9])-([0-9][0-9])$");
+var YAML_TIMESTAMP_REGEXP = /* @__PURE__ */ new RegExp("^([0-9][0-9][0-9][0-9])-([0-9][0-9]?)-([0-9][0-9]?)(?:[Tt]|[ \\t]+)([0-9][0-9]?):([0-9][0-9]):([0-9][0-9])(?:\\.([0-9]*))?(?:[ \\t]*(Z|([-+])([0-9][0-9]?)(?::([0-9][0-9]))?))?$");
+function makeUtcDate(year, month, day, hour = 0, minute = 0, second = 0, fraction = 0) {
+	const date = new Date(Date.UTC(year, month, day, hour, minute, second, fraction));
+	date.setUTCFullYear(year, month, day);
+	return date;
+}
+function resolveYamlTimestamp(source) {
+	let match = YAML_DATE_REGEXP.exec(source);
+	if (match === null) match = YAML_TIMESTAMP_REGEXP.exec(source);
+	if (match === null) return NOT_RESOLVED;
+	const year = +match[1];
+	const month = +match[2] - 1;
+	const day = +match[3];
+	if (!match[4]) {
+		const date = makeUtcDate(year, month, day);
+		if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) return NOT_RESOLVED;
+		return date;
+	}
+	const hour = +match[4];
+	const minute = +match[5];
+	const second = +match[6];
+	let fraction = 0;
+	if (hour > 23 || minute > 59 || second > 59) return NOT_RESOLVED;
+	if (match[7]) {
+		let value = match[7].slice(0, 3);
+		while (value.length < 3) value += "0";
+		fraction = +value;
+	}
+	const date = makeUtcDate(year, month, day, hour, minute, second, fraction);
+	if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day) return NOT_RESOLVED;
+	if (match[9]) {
+		const offsetHour = +match[10];
+		const offsetMinute = +(match[11] || 0);
+		if (offsetHour > 23 || offsetMinute > 59) return NOT_RESOLVED;
+		const offset = (offsetHour * 60 + offsetMinute) * 6e4;
+		date.setTime(date.getTime() - (match[9] === "-" ? -offset : offset));
+	}
+	return date;
+}
+/**
+* The YAML 1.1 `!!timestamp` tag, represented as a JavaScript `Date`.
+*
+* @category Tags
+*/
+var timestampTag = defineScalarTag("tag:yaml.org,2002:timestamp", {
+	implicit: true,
+	implicitFirstChars: [..."0123456789"],
+	resolve: resolveYamlTimestamp,
+	identify: (object) => object instanceof Date,
+	represent: (object) => object.toISOString()
+});
+//#endregion
+//#region src/tag/sequence/seq.ts
+/** @category Tags */
+var seqTag = defineSequenceTag("tag:yaml.org,2002:seq", {
+	create: () => [],
+	addItem: (container, item) => {
+		container.push(item);
+	},
+	identify: Array.isArray
+});
+//#endregion
+//#region src/common/object.ts
+function isPlainObject(data) {
+	if (data === null || typeof data !== "object" || Array.isArray(data)) return false;
+	const prototype = Object.getPrototypeOf(data);
+	return prototype === null || prototype === Object.prototype;
+}
+function pick(object, keys) {
+	const result = {};
+	for (const key of keys) if (object[key] !== void 0) result[key] = object[key];
+	return result;
+}
+//#endregion
+//#region src/tag/sequence/omap.ts
+/**
+* Provided only for YAML 1.1 compatibility and supported by the loader only.
+* JavaScript has no dedicated class to represent this type, so it cannot be
+* identified and dumped.
+*
+* ```yaml
+* !!omap
+*   - one: 1
+*   - two: 2
+* ```
+*
+* is loaded as
+*
+* ```javascript
+* [
+*   { one: 1 },
+*   { two: 2 }
+* ]
+* ```
+*
+* @category Tags
+*/
+var omapTag = defineSequenceTag("tag:yaml.org,2002:omap", {
+	create: () => ({
+		list: [],
+		seen: /* @__PURE__ */ new Set()
+	}),
+	addItem: (carrier, item) => {
+		let key;
+		if (item instanceof Map) {
+			if (item.size !== 1) return "cannot resolve an ordered map item";
+			key = item.keys().next().value;
+		} else if (isPlainObject(item)) {
+			const itemKeys = Object.keys(item);
+			if (itemKeys.length !== 1) return "cannot resolve an ordered map item";
+			key = itemKeys[0];
+		} else return "cannot resolve an ordered map item";
+		if (carrier.seen.has(key)) return "duplicate key in ordered map";
+		carrier.seen.add(key);
+		carrier.list.push(item);
+		return "";
+	},
+	finalize: (carrier) => carrier.list,
+	identify: () => false
+});
+//#endregion
+//#region src/tag/sequence/pairs.ts
+/**
+* Provided only for YAML 1.1 compatibility and supported by the loader only.
+* JavaScript has no dedicated class to represent this type, so it cannot be
+* identified and dumped.
+*
+* ```yaml
+* !!pairs
+*   - one: 1
+*   - two: 2
+* ```
+*
+* is loaded as
+*
+* ```javascript
+* [
+*   ['one', 1],
+*   ['two', 2]
+* ]
+* ```
+*
+* @category Tags
+*/
+var pairsTag = defineSequenceTag("tag:yaml.org,2002:pairs", {
+	create: () => [],
+	addItem: (container, item) => {
+		if (item instanceof Map) {
+			if (item.size !== 1) return "cannot resolve a pairs item";
+			container.push(item.entries().next().value);
+			return "";
 		}
-
-		var _INTERNAL = this[INTERNAL];
-		const target = _INTERNAL.target,
-		      kind = _INTERNAL.kind,
-		      index = _INTERNAL.index;
-
-		const values = getHeaders(target, kind);
-		const len = values.length;
-		if (index >= len) {
-			return {
-				value: undefined,
-				done: true
+		if (Object.prototype.toString.call(item) !== "[object Object]") return "cannot resolve a pairs item";
+		const object = item;
+		const keys = Object.keys(object);
+		if (keys.length !== 1) return "cannot resolve a pairs item";
+		container.push([keys[0], object[keys[0]]]);
+		return "";
+	},
+	identify: () => false
+});
+//#endregion
+//#region src/tag/mapping/map.ts
+/**
+* This is the default mapping implementation. It uses `{}` objects and has only
+* partial functionality due to language limitations. This choice was made
+* because users expect to get JavaScript objects, and it was left unchanged to
+* avoid too many breaking changes in the v5 release.
+*
+* Side effects:
+*
+* - `Object.hasOwn()` checks or `for...of` loops are required for safe use (to
+*   avoid falling through to prototypes).
+* - Only scalar string keys are supported properly.
+* - Other scalar keys, such as `null` and numbers, are converted to strings.
+*   This is historical behaviour, and it can cause side effects such as
+*   problems with `!!merge`.
+*
+* Note that non-string scalar keys may be deprecated in future versions.
+*
+* Ideally, use {@link realMapTag} instead.
+*
+* @category Tags
+*/
+var mapTag = defineMappingTag("tag:yaml.org,2002:map", {
+	create: () => ({}),
+	identify: isPlainObject,
+	represent: (o) => {
+		const map = /* @__PURE__ */ new Map();
+		for (const key of Object.keys(o)) map.set(key, o[key]);
+		return map;
+	},
+	addPair: (container, key, value) => {
+		if (key !== null && typeof key === "object") return "object-based map does not support complex keys";
+		const normalizedKey = String(key);
+		if (normalizedKey === "__proto__") Object.defineProperty(container, normalizedKey, {
+			value,
+			enumerable: true,
+			configurable: true,
+			writable: true
+		});
+		else container[normalizedKey] = value;
+		return "";
+	},
+	has: (container, key) => {
+		if (key !== null && typeof key === "object") return false;
+		return Object.prototype.hasOwnProperty.call(container, String(key));
+	},
+	keys: (container) => Object.keys(container),
+	get: (container, key) => {
+		const normalizedKey = String(key);
+		if (!Object.prototype.hasOwnProperty.call(container, normalizedKey)) return null;
+		return container[normalizedKey];
+	}
+});
+//#endregion
+//#region src/tag/mapping/set.ts
+/**
+* The YAML 1.1 `!!set` tag, represented as a JavaScript `Set`.
+*
+* @category Tags
+*/
+var setTag = defineMappingTag("tag:yaml.org,2002:set", {
+	create: () => /* @__PURE__ */ new Set(),
+	identify: (data) => data instanceof Set,
+	represent: (data) => {
+		const map = /* @__PURE__ */ new Map();
+		for (const key of data) map.set(key, null);
+		return map;
+	},
+	addPair: (container, key, value) => {
+		if (value !== null) return "cannot resolve a set item";
+		container.add(key);
+		return "";
+	},
+	has: (container, key) => container.has(key),
+	keys: (container) => container.keys(),
+	get: () => null
+});
+//#endregion
+//#region \0@oxc-project+runtime@0.137.0/helpers/esm/typeof.js
+function _typeof(o) {
+	"@babel/helpers - typeof";
+	return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function(o) {
+		return typeof o;
+	} : function(o) {
+		return o && "function" == typeof Symbol && o.constructor === Symbol && o !== Symbol.prototype ? "symbol" : typeof o;
+	}, _typeof(o);
+}
+//#endregion
+//#region \0@oxc-project+runtime@0.137.0/helpers/esm/toPrimitive.js
+function toPrimitive(t, r) {
+	if ("object" != _typeof(t) || !t) return t;
+	var e = t[Symbol.toPrimitive];
+	if (void 0 !== e) {
+		var i = e.call(t, r || "default");
+		if ("object" != _typeof(i)) return i;
+		throw new TypeError("@@toPrimitive must return a primitive value.");
+	}
+	return ("string" === r ? String : Number)(t);
+}
+//#endregion
+//#region \0@oxc-project+runtime@0.137.0/helpers/esm/toPropertyKey.js
+function toPropertyKey(t) {
+	var i = toPrimitive(t, "string");
+	return "symbol" == _typeof(i) ? i : i + "";
+}
+//#endregion
+//#region \0@oxc-project+runtime@0.137.0/helpers/esm/defineProperty.js
+function _defineProperty(e, r, t) {
+	return (r = toPropertyKey(r)) in e ? Object.defineProperty(e, r, {
+		value: t,
+		enumerable: !0,
+		configurable: !0,
+		writable: !0
+	}) : e[r] = t, e;
+}
+//#endregion
+//#region \0@oxc-project+runtime@0.137.0/helpers/esm/objectSpread2.js
+function ownKeys(e, r) {
+	var t = Object.keys(e);
+	if (Object.getOwnPropertySymbols) {
+		var o = Object.getOwnPropertySymbols(e);
+		r && (o = o.filter(function(r) {
+			return Object.getOwnPropertyDescriptor(e, r).enumerable;
+		})), t.push.apply(t, o);
+	}
+	return t;
+}
+function _objectSpread2(e) {
+	for (var r = 1; r < arguments.length; r++) {
+		var t = null != arguments[r] ? arguments[r] : {};
+		r % 2 ? ownKeys(Object(t), !0).forEach(function(r) {
+			_defineProperty(e, r, t[r]);
+		}) : Object.getOwnPropertyDescriptors ? Object.defineProperties(e, Object.getOwnPropertyDescriptors(t)) : ownKeys(Object(t)).forEach(function(r) {
+			Object.defineProperty(e, r, Object.getOwnPropertyDescriptor(t, r));
+		});
+	}
+	return e;
+}
+//#endregion
+//#region src/schema.ts
+function createTagDefinitionMap() {
+	return {
+		scalar: Object.create(null),
+		sequence: Object.create(null),
+		mapping: Object.create(null)
+	};
+}
+function createTagDefinitionListMap() {
+	return {
+		scalar: [],
+		sequence: [],
+		mapping: []
+	};
+}
+function compileTags(tags) {
+	const result = [];
+	for (const tag of tags) {
+		let index = result.length;
+		for (let previousIndex = 0; previousIndex < result.length; previousIndex++) {
+			const previous = result[previousIndex];
+			if (previous.nodeKind === tag.nodeKind && previous.tagName === tag.tagName && previous.matchByTagPrefix === tag.matchByTagPrefix) {
+				index = previousIndex;
+				break;
+			}
+		}
+		result[index] = tag;
+	}
+	return result;
+}
+/**
+* Controls tag resolution when loading and type selection when dumping.
+*
+* @category Schemas
+*/
+var Schema = class Schema {
+	constructor(tags) {
+		_defineProperty(this, "tags", void 0);
+		_defineProperty(
+			this,
+			/** @internal */
+			"implicitScalarTags",
+			void 0
+		);
+		_defineProperty(
+			this,
+			/**
+			* Dispatch implicit scalar resolvers by `source.charAt(0)`. Each bucket holds
+			* the resolvers that may match that key, in schema order; a key absent from
+			* the map uses
+			* {@link Schema.implicitScalarAnyFirstChar}
+			* (resolvers that declared no first-char constraint, so they apply to any
+			* first character).
+			*/
+			"implicitScalarByFirstChar",
+			void 0
+		);
+		_defineProperty(this, "implicitScalarAnyFirstChar", void 0);
+		_defineProperty(
+			this,
+			/**
+			* The default scalar tag (`!!str`), resolved once so the composer's fallback
+			* for unresolved plain scalars avoids a keyed lookup per scalar.
+			*
+			* @internal
+			*/
+			"defaultScalarTag",
+			void 0
+		);
+		_defineProperty(
+			this,
+			/**
+			* The default container tags (`!!seq` / `!!map`), used by the dumper: when a
+			* value is identified by its default tag, the tag is implicit and not
+			* printed. Undefined if the schema does not define them (then such values
+			* can't be dumped).
+			*
+			* @internal
+			*/
+			"defaultSequenceTag",
+			void 0
+		);
+		_defineProperty(
+			this,
+			/** @internal */
+			"defaultMappingTag",
+			void 0
+		);
+		_defineProperty(this, "exact", void 0);
+		_defineProperty(this, "prefix", void 0);
+		const compiledTags = compileTags(tags);
+		const implicitScalarTags = [];
+		const exact = createTagDefinitionMap();
+		const prefix = createTagDefinitionListMap();
+		for (const tag of compiledTags) {
+			if (tag.nodeKind === "scalar" && tag.implicit) {
+				if (tag.matchByTagPrefix) throw new Error("Implicit scalar tags cannot match by tag prefix");
+				implicitScalarTags.push(tag);
+			}
+			switch (tag.nodeKind) {
+				case "scalar":
+					if (tag.matchByTagPrefix) prefix.scalar.push(tag);
+					else exact.scalar[tag.tagName] = tag;
+					break;
+				case "sequence":
+					if (tag.matchByTagPrefix) prefix.sequence.push(tag);
+					else exact.sequence[tag.tagName] = tag;
+					break;
+				case "mapping":
+					if (tag.matchByTagPrefix) prefix.mapping.push(tag);
+					else exact.mapping[tag.tagName] = tag;
+					break;
+			}
+		}
+		const implicitScalarAnyFirstChar = implicitScalarTags.filter((tag) => tag.implicitFirstChars === null);
+		const keys = /* @__PURE__ */ new Set();
+		for (const tag of implicitScalarTags) if (tag.implicitFirstChars !== null) for (const key of tag.implicitFirstChars) keys.add(key);
+		const implicitScalarByFirstChar = /* @__PURE__ */ new Map();
+		for (const key of keys) implicitScalarByFirstChar.set(key, implicitScalarTags.filter((tag) => tag.implicitFirstChars === null || tag.implicitFirstChars.indexOf(key) !== -1));
+		const defaultScalarTag = exact.scalar["tag:yaml.org,2002:str"];
+		if (!defaultScalarTag) throw new Error("schema does not define the default scalar tag (tag:yaml.org,2002:str)");
+		this.tags = compiledTags;
+		this.implicitScalarTags = implicitScalarTags;
+		this.implicitScalarByFirstChar = implicitScalarByFirstChar;
+		this.implicitScalarAnyFirstChar = implicitScalarAnyFirstChar;
+		this.defaultScalarTag = defaultScalarTag;
+		this.defaultSequenceTag = exact.sequence["tag:yaml.org,2002:seq"];
+		this.defaultMappingTag = exact.mapping["tag:yaml.org,2002:map"];
+		this.exact = exact;
+		this.prefix = prefix;
+	}
+	/** @internal */
+	lookupScalarTag(tagName) {
+		const exactTag = this.exact.scalar[tagName];
+		if (exactTag) return exactTag;
+		for (const tag of this.prefix.scalar) if (tagName.startsWith(tag.tagName)) return tag;
+	}
+	/** @internal */
+	lookupSequenceTag(tagName) {
+		const exactTag = this.exact.sequence[tagName];
+		if (exactTag) return exactTag;
+		for (const tag of this.prefix.sequence) if (tagName.startsWith(tag.tagName)) return tag;
+	}
+	/** @internal */
+	lookupMappingTag(tagName) {
+		const exactTag = this.exact.mapping[tagName];
+		if (exactTag) return exactTag;
+		for (const tag of this.prefix.mapping) if (tagName.startsWith(tag.tagName)) return tag;
+	}
+	/** @internal */
+	resolveImplicitScalarTag(source) {
+		var _this$implicitScalarB;
+		const candidates = (_this$implicitScalarB = this.implicitScalarByFirstChar.get(source.charAt(0))) !== null && _this$implicitScalarB !== void 0 ? _this$implicitScalarB : this.implicitScalarAnyFirstChar;
+		for (const tag of candidates) {
+			const value = tag.resolve(source, false, tag.tagName);
+			if (value !== NOT_RESOLVED) return {
+				value,
+				tag
 			};
 		}
-
-		this[INTERNAL].index = index + 1;
-
+		const tag = this.defaultScalarTag;
 		return {
-			value: values[index],
-			done: false
+			value: tag.resolve(source, false, tag.tagName),
+			tag
 		};
 	}
-}, Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())));
-
-Object.defineProperty(HeadersIteratorPrototype, Symbol.toStringTag, {
-	value: 'HeadersIterator',
-	writable: false,
-	enumerable: false,
-	configurable: true
-});
-
-/**
- * Export the Headers object in a form that Node.js can consume.
- *
- * @param   Headers  headers
- * @return  Object
- */
-function exportNodeCompatibleHeaders(headers) {
-	const obj = Object.assign({ __proto__: null }, headers[MAP]);
-
-	// http.request() only supports string as Host header. This hack makes
-	// specifying custom Host header possible.
-	const hostHeaderKey = find(headers[MAP], 'Host');
-	if (hostHeaderKey !== undefined) {
-		obj[hostHeaderKey] = obj[hostHeaderKey][0];
+	/**
+	* Creates a new schema with the specified tags added. If a tag already
+	* exists, it is replaced by the specified tag.
+	*
+	* @example
+	*
+	* ```javascript
+	* import { CORE_SCHEMA, mergeTag, realMapTag } from 'js-yaml'
+	*
+	* const schema = CORE_SCHEMA.withTags(mergeTag, realMapTag)
+	* ```
+	*/
+	withTags(...tags) {
+		let flatTags = [];
+		for (const tag of tags) flatTags = flatTags.concat(tag);
+		return new Schema([...this.tags, ...flatTags]);
 	}
-
-	return obj;
-}
-
+};
 /**
- * Create a Headers object from an object of headers, ignoring those that do
- * not conform to HTTP grammar productions.
- *
- * @param   Object  obj  Object of headers
- * @return  Headers
- */
-function createHeadersLenient(obj) {
-	const headers = new Headers();
-	for (const name of Object.keys(obj)) {
-		if (invalidTokenRegex.test(name)) {
+* The YAML 1.2 Failsafe Schema: strings, sequences, and mappings.
+*
+* @category Schemas
+*/
+var FAILSAFE_SCHEMA = new Schema([
+	strTag,
+	seqTag,
+	mapTag
+]);
+/**
+* The YAML 1.2 JSON Schema. It uses JSON scalar forms while retaining YAML
+* collection syntax.
+*
+* @category Schemas
+*/
+var JSON_SCHEMA = new Schema([
+	...FAILSAFE_SCHEMA.tags,
+	nullJsonTag,
+	boolJsonTag,
+	intJsonTag,
+	floatJsonTag
+]);
+/**
+* The default schema for the loaders. Note, {@link CORE_SCHEMA} comes
+* without the `!!merge` tag. You can easily enable it if needed.
+*
+* @example
+* Enable {@link mergeTag}:
+*
+* ```javascript
+* import { load, CORE_SCHEMA, mergeTag } from 'js-yaml'
+*
+* try {
+*   load(data, { schema: CORE_SCHEMA.withTags(mergeTag) })
+* } catch (e) {
+*   console.error(e)
+* }
+* ```
+*
+* @category Schemas
+*/
+var CORE_SCHEMA = new Schema([
+	...FAILSAFE_SCHEMA.tags,
+	nullCoreTag,
+	boolCoreTag,
+	intCoreTag,
+	floatCoreTag
+]);
+/**
+* YAML 1.1-compatible schema.
+*
+* @category Schemas
+*/
+var YAML11_SCHEMA = new Schema([
+	...FAILSAFE_SCHEMA.tags,
+	nullYaml11Tag,
+	boolYaml11Tag,
+	intYaml11Tag,
+	floatYaml11Tag,
+	timestampTag,
+	mergeTag,
+	binaryTag,
+	omapTag,
+	pairsTag,
+	setTag
+]);
+/**
+* The dumper schema for maximum compatibility. It combines all supported type
+* variants from YAML 1.1 and YAML 1.2 so strings matching any of them are
+* quoted. This makes the generated YAML more compatible with other parsers.
+*
+* The schema is based on YAML 1.1, but extends `!!int` and `!!float` to accept
+* both YAML 1.1 and Core Schema forms, since Core Schema supports some forms
+* that YAML 1.1 does not.
+*
+* @category Schemas
+*/
+var DUMP_SCHEMA = YAML11_SCHEMA.withTags(_objectSpread2(_objectSpread2({}, intYaml11Tag), {}, { resolve: (source, isExplicit, tagName) => {
+	const result = intYaml11Tag.resolve(source, isExplicit, tagName);
+	return result === NOT_RESOLVED ? intCoreTag.resolve(source, isExplicit, tagName) : result;
+} }), _objectSpread2(_objectSpread2({}, floatYaml11Tag), {}, { resolve: (source, isExplicit, tagName) => {
+	const result = floatYaml11Tag.resolve(source, isExplicit, tagName);
+	return result === NOT_RESOLVED ? floatCoreTag.resolve(source, isExplicit, tagName) : result;
+} }));
+//#endregion
+//#region src/tag/mapping/real_map.ts
+/**
+* Recommended when non-string keys are actually needed. It uses native
+* JavaScript `Map` objects, so keys keep their constructed types instead of
+* being converted to strings.
+*
+* It is not the default to avoid widespread breaking changes in existing
+* projects. `Map` has a different access API and does not pass deep equality
+* checks against `{}`-based fixtures. Alongside the other changes in v5,
+* making it the default was considered too disruptive.
+*
+* If these differences are acceptable for your project, we recommend using
+* {@link realMapTag} to guarantee the absence of problems and side effects.
+*
+* @example
+* Enable {@link realMapTag}:
+*
+* ```javascript
+* import { load, CORE_SCHEMA, realMapTag } from 'js-yaml'
+*
+* try {
+*   load(data, { schema: CORE_SCHEMA.withTags(realMapTag) })
+* } catch (e) {
+*   console.error(e)
+* }
+* ```
+*
+* @category Tags
+*/
+var realMapTag = defineMappingTag("tag:yaml.org,2002:map", {
+	create: () => /* @__PURE__ */ new Map(),
+	addPair: (container, key, value) => {
+		container.set(key, value);
+		return "";
+	},
+	has: (container, key) => container.has(key),
+	keys: (container) => container.keys(),
+	get: (container, key) => container.get(key),
+	identify: (data) => data instanceof Map || isPlainObject(data),
+	represent: (data) => {
+		if (data instanceof Map) return data;
+		const map = /* @__PURE__ */ new Map();
+		const obj = data;
+		for (const key of Object.keys(obj)) map.set(key, obj[key]);
+		return map;
+	}
+});
+//#endregion
+//#region src/tag/mapping/legacy_map.ts
+function normalizeKey(key) {
+	if (Array.isArray(key)) {
+		const array = Array.prototype.slice.call(key);
+		for (let index = 0; index < array.length; index++) {
+			if (Array.isArray(array[index])) return null;
+			if (typeof array[index] === "object" && Object.prototype.toString.call(array[index]) === "[object Object]") array[index] = "[object Object]";
+		}
+		return String(array);
+	}
+	if (typeof key === "object" && Object.prototype.toString.call(key) === "[object Object]") return "[object Object]";
+	return String(key);
+}
+/**
+* This implementation exists solely to reproduce v4 behavior exactly. Its use
+* is strongly discouraged. If complex or non-string keys are needed, use
+* {@link realMapTag} instead.
+*
+* @category Tags
+*/
+var legacyMapTag = defineMappingTag("tag:yaml.org,2002:map", {
+	create: () => ({}),
+	identify: isPlainObject,
+	represent: (o) => {
+		const map = /* @__PURE__ */ new Map();
+		for (const key of Object.keys(o)) map.set(key, o[key]);
+		return map;
+	},
+	addPair: (container, key, value) => {
+		const normalizedKey = normalizeKey(key);
+		if (normalizedKey === null) return "nested arrays are not supported inside keys";
+		if (normalizedKey === "__proto__") Object.defineProperty(container, normalizedKey, {
+			value,
+			enumerable: true,
+			configurable: true,
+			writable: true
+		});
+		else container[normalizedKey] = value;
+		return "";
+	},
+	has: (container, key) => {
+		const normalizedKey = normalizeKey(key);
+		return normalizedKey !== null && Object.prototype.hasOwnProperty.call(container, normalizedKey);
+	},
+	keys: (container) => Object.keys(container),
+	get: (container, key) => {
+		const normalizedKey = String(key);
+		if (!Object.prototype.hasOwnProperty.call(container, normalizedKey)) return null;
+		return container[normalizedKey];
+	}
+});
+//#endregion
+//#region src/common/snippet.ts
+var DEFAULT_SNIPPET_OPTIONS = {
+	maxLength: 79,
+	indent: 1,
+	linesBefore: 3,
+	linesAfter: 2
+};
+function getLine(buffer, lineStart, lineEnd, position, maxLineLength) {
+	let head = "";
+	let tail = "";
+	const maxHalfLength = Math.floor(maxLineLength / 2) - 1;
+	if (position - lineStart > maxHalfLength) {
+		head = " ... ";
+		lineStart = position - maxHalfLength + head.length;
+	}
+	if (lineEnd - position > maxHalfLength) {
+		tail = " ...";
+		lineEnd = position + maxHalfLength - tail.length;
+	}
+	return {
+		str: head + buffer.slice(lineStart, lineEnd).replace(/\t/g, "→") + tail,
+		pos: position - lineStart + head.length
+	};
+}
+function padStart(string, max) {
+	return " ".repeat(Math.max(max - string.length, 0)) + string;
+}
+function makeSnippet(mark, options) {
+	if (!mark.buffer) return null;
+	const opts = _objectSpread2(_objectSpread2({}, DEFAULT_SNIPPET_OPTIONS), options);
+	const re = /\r?\n|\r|\0/g;
+	const lineStarts = [0];
+	const lineEnds = [];
+	let match;
+	let foundLineNo = -1;
+	while (match = re.exec(mark.buffer)) {
+		lineEnds.push(match.index);
+		lineStarts.push(match.index + match[0].length);
+		if (mark.position <= match.index && foundLineNo < 0) foundLineNo = lineStarts.length - 2;
+	}
+	if (foundLineNo < 0) foundLineNo = lineStarts.length - 1;
+	let result = "";
+	const lineNoLength = Math.min(mark.line + opts.linesAfter, lineEnds.length).toString().length;
+	const maxLineLength = opts.maxLength - (opts.indent + lineNoLength + 3);
+	for (let i = 1; i <= opts.linesBefore; i++) {
+		if (foundLineNo - i < 0) break;
+		const line = getLine(mark.buffer, lineStarts[foundLineNo - i], lineEnds[foundLineNo - i], mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo - i]), maxLineLength);
+		result = `${" ".repeat(opts.indent)}${padStart((mark.line - i + 1).toString(), lineNoLength)} | ${line.str}\n${result}`;
+	}
+	const line = getLine(mark.buffer, lineStarts[foundLineNo], lineEnds[foundLineNo], mark.position, maxLineLength);
+	result += `${" ".repeat(opts.indent)}${padStart((mark.line + 1).toString(), lineNoLength)} | ${line.str}\n`;
+	result += `${"-".repeat(opts.indent + lineNoLength + 3 + line.pos)}^\n`;
+	for (let i = 1; i <= opts.linesAfter; i++) {
+		if (foundLineNo + i >= lineEnds.length) break;
+		const line = getLine(mark.buffer, lineStarts[foundLineNo + i], lineEnds[foundLineNo + i], mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo + i]), maxLineLength);
+		result += `${" ".repeat(opts.indent)}${padStart((mark.line + i + 1).toString(), lineNoLength)} | ${line.str}\n`;
+	}
+	return result.replace(/\n$/, "");
+}
+//#endregion
+//#region src/common/exception.ts
+function formatError(exception, compact) {
+	let where = "";
+	if (!exception.mark) return exception.reason;
+	if (exception.mark.name) where += `in "${exception.mark.name}" `;
+	where += `(${exception.mark.line + 1}:${exception.mark.column + 1})`;
+	if (!compact && exception.mark.snippet) where += `\n\n${exception.mark.snippet}`;
+	return `${exception.reason} ${where}`;
+}
+/**
+* A YAML error. Unlike an ordinary `Error`, it adds a source snippet showing
+* the location of the problem to the error message, when available.
+*
+* @category Main
+*/
+var YAMLException = class YAMLException extends Error {
+	/**
+	* Optional `mark` contains source snippet data. Usually, use
+	* {@link YAMLException.throwAt} instead of passing it directly.
+	*/
+	constructor(reason, mark) {
+		super();
+		_defineProperty(this, "reason", void 0);
+		_defineProperty(this, "mark", void 0);
+		this.name = "YAMLException";
+		this.reason = reason;
+		this.mark = mark;
+		this.message = formatError(this, false);
+		if (Error.captureStackTrace) Error.captureStackTrace(this, this.constructor);
+	}
+	/**
+	* Returns the formatted error, omitting the source snippet in compact mode.
+	*/
+	toString(compact) {
+		return `${this.name}: ${formatError(this, compact)}`;
+	}
+	/**
+	* Builds a YAMLException with a source snippet and throws it. `source` is
+	* the raw input text; `position` is an offset into it.
+	*/
+	static throwAt(source, position, message, filename = "") {
+		let line = 0;
+		let lineStart = 0;
+		for (let index = 0; index < position; index++) {
+			const ch = source.charCodeAt(index);
+			if (ch === 10) {
+				line++;
+				lineStart = index + 1;
+			} else if (ch === 13) {
+				line++;
+				if (source.charCodeAt(index + 1) === 10) index++;
+				lineStart = index + 1;
+			}
+		}
+		const mark = {
+			name: filename,
+			buffer: source,
+			position,
+			line,
+			column: position - lineStart
+		};
+		mark.snippet = makeSnippet(mark);
+		throw new YAMLException(message, mark);
+	}
+};
+//#endregion
+//#region src/parser/events.ts
+/** @category Events */
+var EVENT_ID = {
+	DOCUMENT: 1,
+	SEQUENCE: 2,
+	MAPPING: 3,
+	SCALAR: 4,
+	ALIAS: 5,
+	POP: 6
+};
+/** @category Nodes */
+var SCALAR_STYLE = {
+	PLAIN: 1,
+	SINGLE_QUOTED: 2,
+	DOUBLE_QUOTED: 3,
+	LITERAL_BLOCK: 4,
+	FOLDED_BLOCK: 5
+};
+/** @category Nodes */
+var COLLECTION_STYLE = {
+	BLOCK: 1,
+	FLOW: 2
+};
+/** @category Nodes */
+var CHOMPING_MODE = {
+	CLIP: 1,
+	STRIP: 2,
+	KEEP: 3
+};
+//#endregion
+//#region src/parser/parser_scalar.ts
+var NO_RANGE$3 = -1;
+function simpleEscapeSequence(c) {
+	switch (c) {
+		case 48: return "\0";
+		case 97: return "\x07";
+		case 98: return "\b";
+		case 116: return "	";
+		case 9: return "	";
+		case 110: return "\n";
+		case 118: return "\v";
+		case 102: return "\f";
+		case 114: return "\r";
+		case 101: return "\x1B";
+		case 32: return " ";
+		case 34: return "\"";
+		case 47: return "/";
+		case 92: return "\\";
+		case 78: return "";
+		case 95: return "\xA0";
+		case 76: return "\u2028";
+		case 80: return "\u2029";
+		default: return "";
+	}
+}
+var simpleEscapeCheck = new Array(256);
+var simpleEscapeMap = new Array(256);
+for (let i = 0; i < 256; i++) {
+	simpleEscapeCheck[i] = simpleEscapeSequence(i) ? 1 : 0;
+	simpleEscapeMap[i] = simpleEscapeSequence(i);
+}
+function charFromCodepoint(c) {
+	if (c <= 65535) return String.fromCharCode(c);
+	return String.fromCharCode((c - 65536 >> 10) + 55296, (c - 65536 & 1023) + 56320);
+}
+function fromHexCode$1(c) {
+	if (c >= 48 && c <= 57) return c - 48;
+	return (c | 32) - 97 + 10;
+}
+function escapedHexLen$1(c) {
+	if (c === 120) return 2;
+	if (c === 117) return 4;
+	return 8;
+}
+function skipFoldedBreaks(input, position, end) {
+	let breaks = 0;
+	while (position < end) {
+		const ch = input.charCodeAt(position);
+		if (ch === 10) {
+			breaks++;
+			position++;
+		} else if (ch === 13) {
+			breaks++;
+			position++;
+			if (input.charCodeAt(position) === 10) position++;
+		} else if (ch === 32 || ch === 9) position++;
+		else break;
+	}
+	return {
+		position,
+		breaks
+	};
+}
+function foldedBreaks(count) {
+	if (count === 1) return " ";
+	return "\n".repeat(count - 1);
+}
+function getPlainValue(input, start, end) {
+	let result = "";
+	let position = start;
+	let captureStart = start;
+	let captureEnd = start;
+	while (position < end) {
+		const ch = input.charCodeAt(position);
+		if (ch === 10 || ch === 13) {
+			result += input.slice(captureStart, captureEnd);
+			const fold = skipFoldedBreaks(input, position, end);
+			result += foldedBreaks(fold.breaks);
+			position = captureStart = captureEnd = fold.position;
+		} else {
+			position++;
+			if (ch !== 32 && ch !== 9) captureEnd = position;
+		}
+	}
+	return result + input.slice(captureStart, captureEnd);
+}
+function getSingleQuotedValue(input, start, end) {
+	let result = "";
+	let position = start;
+	let captureStart = start;
+	let captureEnd = start;
+	while (position < end) {
+		const ch = input.charCodeAt(position);
+		if (ch === 39) {
+			result += input.slice(captureStart, position) + "'";
+			position += 2;
+			captureStart = captureEnd = position;
+		} else if (ch === 10 || ch === 13) {
+			result += input.slice(captureStart, captureEnd);
+			const fold = skipFoldedBreaks(input, position, end);
+			result += foldedBreaks(fold.breaks);
+			position = captureStart = captureEnd = fold.position;
+		} else {
+			position++;
+			if (ch !== 32 && ch !== 9) captureEnd = position;
+		}
+	}
+	return result + input.slice(captureStart, end);
+}
+function getDoubleQuotedValue(input, start, end) {
+	let result = "";
+	let position = start;
+	let captureStart = start;
+	let captureEnd = start;
+	while (position < end) {
+		const ch = input.charCodeAt(position);
+		if (ch === 92) {
+			result += input.slice(captureStart, position);
+			position++;
+			const escaped = input.charCodeAt(position);
+			if (escaped === 10 || escaped === 13) position = skipFoldedBreaks(input, position, end).position;
+			else if (escaped < 256 && simpleEscapeCheck[escaped]) {
+				result += simpleEscapeMap[escaped];
+				position++;
+			} else {
+				let hexLength = escapedHexLen$1(escaped);
+				let hexResult = 0;
+				for (; hexLength > 0; hexLength--) {
+					position++;
+					const digit = fromHexCode$1(input.charCodeAt(position));
+					hexResult = (hexResult << 4) + digit;
+				}
+				result += charFromCodepoint(hexResult);
+				position++;
+			}
+			captureStart = captureEnd = position;
+		} else if (ch === 10 || ch === 13) {
+			result += input.slice(captureStart, captureEnd);
+			const fold = skipFoldedBreaks(input, position, end);
+			result += foldedBreaks(fold.breaks);
+			position = captureStart = captureEnd = fold.position;
+		} else {
+			position++;
+			if (ch !== 32 && ch !== 9) captureEnd = position;
+		}
+	}
+	return result + input.slice(captureStart, end);
+}
+function getBlockValue(input, start, end, indent, chomping, folded) {
+	const textIndent = indent < 0 ? 0 : indent;
+	const region = input.slice(start, end).replace(/\r\n?/g, "\n");
+	const lines = region === "" ? [] : (region.endsWith("\n") ? region.slice(0, -1) : region).split("\n");
+	let result = "";
+	let didReadContent = false;
+	let emptyLines = 0;
+	let atMoreIndented = false;
+	for (const line of lines) {
+		let column = 0;
+		while (column < textIndent && line.charCodeAt(column) === 32) column++;
+		if (indent < 0 || column >= line.length) {
+			emptyLines++;
 			continue;
 		}
-		if (Array.isArray(obj[name])) {
-			for (const val of obj[name]) {
-				if (invalidHeaderCharRegex.test(val)) {
-					continue;
-				}
-				if (headers[MAP][name] === undefined) {
-					headers[MAP][name] = [val];
-				} else {
-					headers[MAP][name].push(val);
-				}
-			}
-		} else if (!invalidHeaderCharRegex.test(obj[name])) {
-			headers[MAP][name] = [obj[name]];
-		}
+		const content = line.slice(textIndent);
+		const first = content.charCodeAt(0);
+		if (folded) if (first === 32 || first === 9) {
+			atMoreIndented = true;
+			result += "\n".repeat(didReadContent ? 1 + emptyLines : emptyLines);
+		} else if (atMoreIndented) {
+			atMoreIndented = false;
+			result += "\n".repeat(emptyLines + 1);
+		} else if (emptyLines === 0) {
+			if (didReadContent) result += " ";
+		} else result += "\n".repeat(emptyLines);
+		else result += "\n".repeat(didReadContent ? 1 + emptyLines : emptyLines);
+		result += content;
+		didReadContent = true;
+		emptyLines = 0;
 	}
-	return headers;
+	if (chomping === CHOMPING_MODE.KEEP) result += "\n".repeat(didReadContent ? 1 + emptyLines : emptyLines);
+	else if (chomping !== CHOMPING_MODE.STRIP) {
+		if (didReadContent) result += "\n";
+	}
+	return result;
 }
-
-const INTERNALS$1 = Symbol('Response internals');
-
-// fix an issue where "STATUS_CODES" aren't a named export for node <10
-const STATUS_CODES = http.STATUS_CODES;
-
 /**
- * Response class
- *
- * @param   Stream  body  Readable stream
- * @param   Object  opts  Response options
- * @return  Void
- */
-class Response {
-	constructor() {
-		let body = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : null;
-		let opts = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
-
-		Body.call(this, body, opts);
-
-		const status = opts.status || 200;
-		const headers = new Headers(opts.headers);
-
-		if (body != null && !headers.has('Content-Type')) {
-			const contentType = extractContentType(body);
-			if (contentType) {
-				headers.append('Content-Type', contentType);
-			}
-		}
-
-		this[INTERNALS$1] = {
-			url: opts.url,
-			status,
-			statusText: opts.statusText || STATUS_CODES[status],
-			headers,
-			counter: opts.counter
+* Decodes the scalar referenced by event offsets in `input`.
+*
+* @category Events
+*/
+function getScalarValue(input, scalar) {
+	if (scalar.valueStart === NO_RANGE$3) return "";
+	const { valueStart, valueEnd } = scalar;
+	if (scalar.fast) return input.slice(valueStart, valueEnd);
+	switch (scalar.style) {
+		case SCALAR_STYLE.SINGLE_QUOTED: return getSingleQuotedValue(input, valueStart, valueEnd);
+		case SCALAR_STYLE.DOUBLE_QUOTED: return getDoubleQuotedValue(input, valueStart, valueEnd);
+		case SCALAR_STYLE.LITERAL_BLOCK: return getBlockValue(input, valueStart, valueEnd, scalar.indent, scalar.chomping, false);
+		case SCALAR_STYLE.FOLDED_BLOCK: return getBlockValue(input, valueStart, valueEnd, scalar.indent, scalar.chomping, true);
+		default: return getPlainValue(input, valueStart, valueEnd);
+	}
+}
+//#endregion
+//#region src/common/tagname.ts
+var DEFAULT_TAG_HANDLERS = Object.assign(Object.create(null), {
+	"!": "!",
+	"!!": "tag:yaml.org,2002:"
+});
+function tagPercentEncode(source) {
+	return encodeURI(source).replace(/!/g, "%21");
+}
+function tagNameFull(rawTag, tagHandlers) {
+	var _ref, _tagHandlers$handle;
+	if (rawTag.startsWith("!<") && rawTag.endsWith(">")) return decodeURIComponent(rawTag.slice(2, -1));
+	const handleEnd = rawTag.indexOf("!", 1);
+	const handle = handleEnd === -1 ? "!" : rawTag.slice(0, handleEnd + 1);
+	const prefix = (_ref = (_tagHandlers$handle = tagHandlers === null || tagHandlers === void 0 ? void 0 : tagHandlers[handle]) !== null && _tagHandlers$handle !== void 0 ? _tagHandlers$handle : DEFAULT_TAG_HANDLERS[handle]) !== null && _ref !== void 0 ? _ref : handle;
+	return decodeURIComponent(prefix) + decodeURIComponent(rawTag.slice(handle.length));
+}
+function tagNameShort(fullTag) {
+	let tag = fullTag;
+	if (tag.charCodeAt(0) === 33) {
+		tag = tag.slice(1);
+		return `!${tagPercentEncode(tag)}`;
+	}
+	if (tag.slice(0, 18) === "tag:yaml.org,2002:") return `!!${tagPercentEncode(tag.slice(18))}`;
+	return `!<${tagPercentEncode(tag)}>`;
+}
+//#endregion
+//#region src/parser/constructor.ts
+var NO_RANGE$2 = -1;
+var MERGE_TAG_NAME = "tag:yaml.org,2002:merge";
+var DEFAULT_CONSTRUCTOR_OPTIONS = {
+	filename: "",
+	schema: CORE_SCHEMA,
+	json: false,
+	maxTotalMergeKeys: 1e4,
+	maxAliases: -1
+};
+function eventPosition$1(event) {
+	if ("tagStart" in event && event.tagStart !== NO_RANGE$2) return event.tagStart;
+	if ("anchorStart" in event && event.anchorStart !== NO_RANGE$2) return event.anchorStart;
+	if ("valueStart" in event && event.valueStart !== NO_RANGE$2) return event.valueStart;
+	if ("start" in event) return event.start;
+	return 0;
+}
+function throwError$1(state, message) {
+	YAMLException.throwAt(state.source, state.position, message, state.filename);
+}
+function finalizeCollection(state, position, tag, carrier) {
+	try {
+		return tag.finalize(carrier);
+	} catch (error) {
+		if (error instanceof YAMLException) throw error;
+		YAMLException.throwAt(state.source, position, error instanceof Error ? error.message : String(error), state.filename);
+	}
+}
+function constructScalar(state, event) {
+	const source = getScalarValue(state.source, event);
+	const rawTag = event.tagStart === NO_RANGE$2 ? "" : state.source.slice(event.tagStart, event.tagEnd);
+	const strTag = state.schema.defaultScalarTag;
+	if (rawTag !== "") {
+		var _state$schema$lookupM;
+		if (rawTag === "!") return {
+			value: source,
+			tag: strTag
 		};
+		const tagName = tagNameFull(rawTag, state.tagHandlers);
+		const scalarTag = state.schema.lookupScalarTag(tagName);
+		if (scalarTag) {
+			const result = scalarTag.resolve(source, true, tagName);
+			if (result === NOT_RESOLVED) throwError$1(state, `cannot resolve a node with !<${tagName}> explicit tag`);
+			return {
+				value: result,
+				tag: scalarTag
+			};
+		}
+		const collectionTagDef = (_state$schema$lookupM = state.schema.lookupMappingTag(tagName)) !== null && _state$schema$lookupM !== void 0 ? _state$schema$lookupM : state.schema.lookupSequenceTag(tagName);
+		if (collectionTagDef) {
+			if (source !== "") throwError$1(state, `cannot resolve a node with !<${tagName}> explicit tag`);
+			const carrier = collectionTagDef.create(tagName);
+			return {
+				value: collectionTagDef.carrierIsResult ? carrier : finalizeCollection(state, state.position, collectionTagDef, carrier),
+				tag: collectionTagDef
+			};
+		}
+		throwError$1(state, `unknown scalar tag !<${tagName}>`);
 	}
-
-	get url() {
-		return this[INTERNALS$1].url || '';
-	}
-
-	get status() {
-		return this[INTERNALS$1].status;
-	}
-
-	/**
-  * Convenience property representing if the request ended normally
-  */
-	get ok() {
-		return this[INTERNALS$1].status >= 200 && this[INTERNALS$1].status < 300;
-	}
-
-	get redirected() {
-		return this[INTERNALS$1].counter > 0;
-	}
-
-	get statusText() {
-		return this[INTERNALS$1].statusText;
-	}
-
-	get headers() {
-		return this[INTERNALS$1].headers;
-	}
-
-	/**
-  * Clone this response
-  *
-  * @return  Response
-  */
-	clone() {
-		return new Response(clone(this), {
-			url: this.url,
-			status: this.status,
-			statusText: this.statusText,
-			headers: this.headers,
-			ok: this.ok,
-			redirected: this.redirected
-		});
+	if (event.style === SCALAR_STYLE.PLAIN) return state.schema.resolveImplicitScalarTag(source);
+	return {
+		value: strTag.resolve(source, false, strTag.tagName),
+		tag: strTag
+	};
+}
+function collectionTagName(state, event, defaultTagName) {
+	const rawTag = event.tagStart === NO_RANGE$2 ? "" : state.source.slice(event.tagStart, event.tagEnd);
+	return rawTag === "" || rawTag === "!" ? defaultTagName : tagNameFull(rawTag, state.tagHandlers);
+}
+function isMappingTag(tag) {
+	return tag.nodeKind === "mapping";
+}
+function chargeMergeWork(state) {
+	state.totalMergeKeys++;
+	if (state.maxTotalMergeKeys !== -1 && state.totalMergeKeys > state.maxTotalMergeKeys) throwError$1(state, `merge keys exceeded maxTotalMergeKeys (${state.maxTotalMergeKeys})`);
+}
+function mergeKeys(state, frame, source, sourceTag) {
+	chargeMergeWork(state);
+	for (const sourceKey of sourceTag.keys(source)) {
+		var _frame$overridable;
+		chargeMergeWork(state);
+		if (frame.tag.has(frame.value, sourceKey)) continue;
+		const err = frame.tag.addPair(frame.value, sourceKey, sourceTag.get(source, sourceKey));
+		if (err) throwError$1(state, err);
+		(_frame$overridable = frame.overridable) !== null && _frame$overridable !== void 0 || (frame.overridable = /* @__PURE__ */ new Set());
+		frame.overridable.add(sourceKey);
 	}
 }
-
-Body.mixIn(Response.prototype);
-
-Object.defineProperties(Response.prototype, {
-	url: { enumerable: true },
-	status: { enumerable: true },
-	ok: { enumerable: true },
-	redirected: { enumerable: true },
-	statusText: { enumerable: true },
-	headers: { enumerable: true },
-	clone: { enumerable: true }
-});
-
-Object.defineProperty(Response.prototype, Symbol.toStringTag, {
-	value: 'Response',
-	writable: false,
-	enumerable: false,
-	configurable: true
-});
-
-const INTERNALS$2 = Symbol('Request internals');
-
-// fix an issue where "format", "parse" aren't a named export for node <10
-const parse_url = Url.parse;
-const format_url = Url.format;
-
-const streamDestructionSupported = 'destroy' in Stream.Readable.prototype;
-
-/**
- * Check if a value is an instance of Request.
- *
- * @param   Mixed   input
- * @return  Boolean
- */
-function isRequest(input) {
-	return typeof input === 'object' && typeof input[INTERNALS$2] === 'object';
+function mergeSource(state, frame, source, sourceTag) {
+	state.position = frame.keyPosition;
+	if (isMappingTag(sourceTag)) mergeKeys(state, frame, source, sourceTag);
+	else if (sourceTag.nodeKind === "sequence" && Array.isArray(source)) {
+		if (source.length > 100) throwError$1(state, "abnormal merge sequence size");
+		for (const element of source) {
+			const elementTag = state.nodeTags.get(element);
+			if (!elementTag) throwError$1(state, "cannot merge mappings; the provided source object is unacceptable");
+			mergeKeys(state, frame, element, elementTag);
+		}
+	} else throwError$1(state, "cannot merge mappings; the provided source object is unacceptable");
 }
-
-function isAbortSignal(signal) {
-	const proto = signal && typeof signal === 'object' && Object.getPrototypeOf(signal);
-	return !!(proto && proto.constructor.name === 'AbortSignal');
+function addMappingValue(state, frame, key, value, tag) {
+	var _frame$overridable2, _frame$overridable3;
+	state.position = frame.keyPosition;
+	if (frame.keyIsMerge) {
+		mergeSource(state, frame, value, tag);
+		return;
+	}
+	if (!state.json && frame.tag.has(frame.value, key) && !((_frame$overridable2 = frame.overridable) === null || _frame$overridable2 === void 0 ? void 0 : _frame$overridable2.has(key))) throwError$1(state, "duplicated mapping key");
+	const err = frame.tag.addPair(frame.value, key, value);
+	if (err) throwError$1(state, err);
+	(_frame$overridable3 = frame.overridable) === null || _frame$overridable3 === void 0 || _frame$overridable3.delete(key);
 }
-
-/**
- * Request class
- *
- * @param   Mixed   input  Url or Request instance
- * @param   Object  init   Custom options
- * @return  Void
- */
-class Request {
-	constructor(input) {
-		let init = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
-
-		let parsedURL;
-
-		// normalize input
-		if (!isRequest(input)) {
-			if (input && input.href) {
-				// in order to support Node.js' Url objects; though WHATWG's URL objects
-				// will fall into this branch also (since their `toString()` will return
-				// `href` property anyway)
-				parsedURL = parse_url(input.href);
-			} else {
-				// coerce input to a string before attempting to parse
-				parsedURL = parse_url(`${input}`);
-			}
-			input = {};
-		} else {
-			parsedURL = parse_url(input.url);
-		}
-
-		let method = init.method || input.method || 'GET';
-		method = method.toUpperCase();
-
-		if ((init.body != null || isRequest(input) && input.body !== null) && (method === 'GET' || method === 'HEAD')) {
-			throw new TypeError('Request with GET/HEAD method cannot have body');
-		}
-
-		let inputBody = init.body != null ? init.body : isRequest(input) && input.body !== null ? clone(input) : null;
-
-		Body.call(this, inputBody, {
-			timeout: init.timeout || input.timeout || 0,
-			size: init.size || input.size || 0
-		});
-
-		const headers = new Headers(init.headers || input.headers || {});
-
-		if (inputBody != null && !headers.has('Content-Type')) {
-			const contentType = extractContentType(inputBody);
-			if (contentType) {
-				headers.append('Content-Type', contentType);
-			}
-		}
-
-		let signal = isRequest(input) ? input.signal : null;
-		if ('signal' in init) signal = init.signal;
-
-		if (signal != null && !isAbortSignal(signal)) {
-			throw new TypeError('Expected signal to be an instanceof AbortSignal');
-		}
-
-		this[INTERNALS$2] = {
-			method,
-			redirect: init.redirect || input.redirect || 'follow',
-			headers,
-			parsedURL,
-			signal
+function addValue(state, value, tag) {
+	const frame = state.frames[state.frames.length - 1];
+	if (frame.kind === "document") {
+		frame.value = value;
+		frame.hasValue = true;
+	} else if (frame.kind === "sequence") {
+		if (isMappingTag(tag)) state.nodeTags.set(value, tag);
+		const err = frame.tag.addItem(frame.value, value, frame.index++);
+		if (err) throwError$1(state, err);
+	} else if (frame.hasKey) {
+		const key = frame.key;
+		frame.key = void 0;
+		frame.hasKey = false;
+		addMappingValue(state, frame, key, value, tag);
+	} else {
+		frame.key = value;
+		frame.keyPosition = state.position;
+		frame.hasKey = true;
+		frame.keyIsMerge = tag.tagName === MERGE_TAG_NAME;
+	}
+}
+function storeAnchor(state, event, value, tag, isValueFinal) {
+	if (event.anchorStart !== NO_RANGE$2) {
+		const anchor = {
+			value,
+			tag,
+			isValueFinal
 		};
-
-		// node-fetch-only options
-		this.follow = init.follow !== undefined ? init.follow : input.follow !== undefined ? input.follow : 20;
-		this.compress = init.compress !== undefined ? init.compress : input.compress !== undefined ? input.compress : true;
-		this.counter = init.counter || input.counter || 0;
-		this.agent = init.agent || input.agent;
+		state.anchors.set(state.source.slice(event.anchorStart, event.anchorEnd), anchor);
+		return anchor;
 	}
-
-	get method() {
-		return this[INTERNALS$2].method;
-	}
-
-	get url() {
-		return format_url(this[INTERNALS$2].parsedURL);
-	}
-
-	get headers() {
-		return this[INTERNALS$2].headers;
-	}
-
-	get redirect() {
-		return this[INTERNALS$2].redirect;
-	}
-
-	get signal() {
-		return this[INTERNALS$2].signal;
-	}
-
-	/**
-  * Clone this request
-  *
-  * @return  Request
-  */
-	clone() {
-		return new Request(this);
-	}
+	return null;
 }
-
-Body.mixIn(Request.prototype);
-
-Object.defineProperty(Request.prototype, Symbol.toStringTag, {
-	value: 'Request',
-	writable: false,
-	enumerable: false,
-	configurable: true
-});
-
-Object.defineProperties(Request.prototype, {
-	method: { enumerable: true },
-	url: { enumerable: true },
-	headers: { enumerable: true },
-	redirect: { enumerable: true },
-	clone: { enumerable: true },
-	signal: { enumerable: true }
-});
-
 /**
- * Convert a Request to Node.js http request options.
- *
- * @param   Request  A Request instance
- * @return  Object   The options object to be passed to http.request
- */
-function getNodeRequestOptions(request) {
-	const parsedURL = request[INTERNALS$2].parsedURL;
-	const headers = new Headers(request[INTERNALS$2].headers);
-
-	// fetch step 1.3
-	if (!headers.has('Accept')) {
-		headers.set('Accept', '*/*');
-	}
-
-	// Basic fetch
-	if (!parsedURL.protocol || !parsedURL.hostname) {
-		throw new TypeError('Only absolute URLs are supported');
-	}
-
-	if (!/^https?:$/.test(parsedURL.protocol)) {
-		throw new TypeError('Only HTTP(S) protocols are supported');
-	}
-
-	if (request.signal && request.body instanceof Stream.Readable && !streamDestructionSupported) {
-		throw new Error('Cancellation of streamed requests with AbortSignal is not supported in node < 8');
-	}
-
-	// HTTP-network-or-cache fetch steps 2.4-2.7
-	let contentLengthValue = null;
-	if (request.body == null && /^(POST|PUT)$/i.test(request.method)) {
-		contentLengthValue = '0';
-	}
-	if (request.body != null) {
-		const totalBytes = getTotalBytes(request);
-		if (typeof totalBytes === 'number') {
-			contentLengthValue = String(totalBytes);
-		}
-	}
-	if (contentLengthValue) {
-		headers.set('Content-Length', contentLengthValue);
-	}
-
-	// HTTP-network-or-cache fetch step 2.11
-	if (!headers.has('User-Agent')) {
-		headers.set('User-Agent', 'node-fetch/1.0 (+https://github.com/bitinn/node-fetch)');
-	}
-
-	// HTTP-network-or-cache fetch step 2.15
-	if (request.compress && !headers.has('Accept-Encoding')) {
-		headers.set('Accept-Encoding', 'gzip,deflate');
-	}
-
-	let agent = request.agent;
-	if (typeof agent === 'function') {
-		agent = agent(parsedURL);
-	}
-
-	if (!headers.has('Connection') && !agent) {
-		headers.set('Connection', 'close');
-	}
-
-	// HTTP-network fetch step 4.2
-	// chunked encoding is handled by Node.js
-
-	return Object.assign({}, parsedURL, {
-		method: request.method,
-		headers: exportNodeCompatibleHeaders(headers),
-		agent
+* Constructs JavaScript documents directly from parser events, without an
+* intermediate AST.
+*
+* @category Events
+*/
+function constructFromEvents(events, options) {
+	const state = _objectSpread2(_objectSpread2(_objectSpread2({}, DEFAULT_CONSTRUCTOR_OPTIONS), options), {}, {
+		events,
+		documents: [],
+		eventIndex: 0,
+		position: 0,
+		frames: [],
+		anchors: /* @__PURE__ */ new Map(),
+		nodeTags: /* @__PURE__ */ new Map(),
+		tagHandlers: Object.create(null),
+		totalMergeKeys: 0,
+		aliasCount: 0
 	});
-}
-
-/**
- * abort-error.js
- *
- * AbortError interface for cancelled requests
- */
-
-/**
- * Create AbortError instance
- *
- * @param   String      message      Error message for human
- * @return  AbortError
- */
-function AbortError(message) {
-  Error.call(this, message);
-
-  this.type = 'aborted';
-  this.message = message;
-
-  // hide custom error implementation details from end-users
-  Error.captureStackTrace(this, this.constructor);
-}
-
-AbortError.prototype = Object.create(Error.prototype);
-AbortError.prototype.constructor = AbortError;
-AbortError.prototype.name = 'AbortError';
-
-// fix an issue where "PassThrough", "resolve" aren't a named export for node <10
-const PassThrough$1 = Stream.PassThrough;
-const resolve_url = Url.resolve;
-
-/**
- * Fetch function
- *
- * @param   Mixed    url   Absolute url or Request instance
- * @param   Object   opts  Fetch options
- * @return  Promise
- */
-function fetch(url, opts) {
-
-	// allow custom promise
-	if (!fetch.Promise) {
-		throw new Error('native promise missing, set fetch.Promise to your favorite alternative');
-	}
-
-	Body.Promise = fetch.Promise;
-
-	// wrap http.request into fetch
-	return new fetch.Promise(function (resolve, reject) {
-		// build request object
-		const request = new Request(url, opts);
-		const options = getNodeRequestOptions(request);
-
-		const send = (options.protocol === 'https:' ? https : http).request;
-		const signal = request.signal;
-
-		let response = null;
-
-		const abort = function abort() {
-			let error = new AbortError('The user aborted a request.');
-			reject(error);
-			if (request.body && request.body instanceof Stream.Readable) {
-				request.body.destroy(error);
-			}
-			if (!response || !response.body) return;
-			response.body.emit('error', error);
-		};
-
-		if (signal && signal.aborted) {
-			abort();
-			return;
-		}
-
-		const abortAndFinalize = function abortAndFinalize() {
-			abort();
-			finalize();
-		};
-
-		// send request
-		const req = send(options);
-		let reqTimeout;
-
-		if (signal) {
-			signal.addEventListener('abort', abortAndFinalize);
-		}
-
-		function finalize() {
-			req.abort();
-			if (signal) signal.removeEventListener('abort', abortAndFinalize);
-			clearTimeout(reqTimeout);
-		}
-
-		if (request.timeout) {
-			req.once('socket', function (socket) {
-				reqTimeout = setTimeout(function () {
-					reject(new FetchError(`network timeout at: ${request.url}`, 'request-timeout'));
-					finalize();
-				}, request.timeout);
-			});
-		}
-
-		req.on('error', function (err) {
-			reject(new FetchError(`request to ${request.url} failed, reason: ${err.message}`, 'system', err));
-			finalize();
-		});
-
-		req.on('response', function (res) {
-			clearTimeout(reqTimeout);
-
-			const headers = createHeadersLenient(res.headers);
-
-			// HTTP fetch step 5
-			if (fetch.isRedirect(res.statusCode)) {
-				// HTTP fetch step 5.2
-				const location = headers.get('Location');
-
-				// HTTP fetch step 5.3
-				const locationURL = location === null ? null : resolve_url(request.url, location);
-
-				// HTTP fetch step 5.5
-				switch (request.redirect) {
-					case 'error':
-						reject(new FetchError(`uri requested responds with a redirect, redirect mode is set to error: ${request.url}`, 'no-redirect'));
-						finalize();
-						return;
-					case 'manual':
-						// node-fetch-specific step: make manual redirect a bit easier to use by setting the Location header value to the resolved URL.
-						if (locationURL !== null) {
-							// handle corrupted header
-							try {
-								headers.set('Location', locationURL);
-							} catch (err) {
-								// istanbul ignore next: nodejs server prevent invalid response headers, we can't test this through normal request
-								reject(err);
-							}
-						}
-						break;
-					case 'follow':
-						// HTTP-redirect fetch step 2
-						if (locationURL === null) {
-							break;
-						}
-
-						// HTTP-redirect fetch step 5
-						if (request.counter >= request.follow) {
-							reject(new FetchError(`maximum redirect reached at: ${request.url}`, 'max-redirect'));
-							finalize();
-							return;
-						}
-
-						// HTTP-redirect fetch step 6 (counter increment)
-						// Create a new Request object.
-						const requestOpts = {
-							headers: new Headers(request.headers),
-							follow: request.follow,
-							counter: request.counter + 1,
-							agent: request.agent,
-							compress: request.compress,
-							method: request.method,
-							body: request.body,
-							signal: request.signal,
-							timeout: request.timeout,
-							size: request.size
-						};
-
-						// HTTP-redirect fetch step 9
-						if (res.statusCode !== 303 && request.body && getTotalBytes(request) === null) {
-							reject(new FetchError('Cannot follow redirect with body being a readable stream', 'unsupported-redirect'));
-							finalize();
-							return;
-						}
-
-						// HTTP-redirect fetch step 11
-						if (res.statusCode === 303 || (res.statusCode === 301 || res.statusCode === 302) && request.method === 'POST') {
-							requestOpts.method = 'GET';
-							requestOpts.body = undefined;
-							requestOpts.headers.delete('content-length');
-						}
-
-						// HTTP-redirect fetch step 15
-						resolve(fetch(new Request(locationURL, requestOpts)));
-						finalize();
-						return;
-				}
-			}
-
-			// prepare response
-			res.once('end', function () {
-				if (signal) signal.removeEventListener('abort', abortAndFinalize);
-			});
-			let body = res.pipe(new PassThrough$1());
-
-			const response_options = {
-				url: request.url,
-				status: res.statusCode,
-				statusText: res.statusMessage,
-				headers: headers,
-				size: request.size,
-				timeout: request.timeout,
-				counter: request.counter
-			};
-
-			// HTTP-network fetch step 12.1.1.3
-			const codings = headers.get('Content-Encoding');
-
-			// HTTP-network fetch step 12.1.1.4: handle content codings
-
-			// in following scenarios we ignore compression support
-			// 1. compression support is disabled
-			// 2. HEAD request
-			// 3. no Content-Encoding header
-			// 4. no content response (204)
-			// 5. content not modified response (304)
-			if (!request.compress || request.method === 'HEAD' || codings === null || res.statusCode === 204 || res.statusCode === 304) {
-				response = new Response(body, response_options);
-				resolve(response);
-				return;
-			}
-
-			// For Node v6+
-			// Be less strict when decoding compressed responses, since sometimes
-			// servers send slightly invalid responses that are still accepted
-			// by common browsers.
-			// Always using Z_SYNC_FLUSH is what cURL does.
-			const zlibOptions = {
-				flush: zlib.Z_SYNC_FLUSH,
-				finishFlush: zlib.Z_SYNC_FLUSH
-			};
-
-			// for gzip
-			if (codings == 'gzip' || codings == 'x-gzip') {
-				body = body.pipe(zlib.createGunzip(zlibOptions));
-				response = new Response(body, response_options);
-				resolve(response);
-				return;
-			}
-
-			// for deflate
-			if (codings == 'deflate' || codings == 'x-deflate') {
-				// handle the infamous raw deflate response from old servers
-				// a hack for old IIS and Apache servers
-				const raw = res.pipe(new PassThrough$1());
-				raw.once('data', function (chunk) {
-					// see http://stackoverflow.com/questions/37519828
-					if ((chunk[0] & 0x0F) === 0x08) {
-						body = body.pipe(zlib.createInflate());
-					} else {
-						body = body.pipe(zlib.createInflateRaw());
-					}
-					response = new Response(body, response_options);
-					resolve(response);
+	while (state.eventIndex < state.events.length) {
+		const event = state.events[state.eventIndex++];
+		state.position = eventPosition$1(event);
+		switch (event.type) {
+			case EVENT_ID.DOCUMENT:
+				state.anchors = /* @__PURE__ */ new Map();
+				state.nodeTags = /* @__PURE__ */ new Map();
+				state.aliasCount = 0;
+				state.tagHandlers = Object.create(null);
+				for (const directive of event.directives) if (directive.kind === "tag") state.tagHandlers[directive.handle] = directive.prefix;
+				state.frames.push({
+					kind: "document",
+					position: state.position,
+					value: void 0,
+					hasValue: false
 				});
-				return;
+				break;
+			case EVENT_ID.SCALAR: {
+				const { value, tag } = constructScalar(state, event);
+				storeAnchor(state, event, value, tag, true);
+				addValue(state, value, tag);
+				break;
 			}
-
-			// for br
-			if (codings == 'br' && typeof zlib.createBrotliDecompress === 'function') {
-				body = body.pipe(zlib.createBrotliDecompress());
-				response = new Response(body, response_options);
-				resolve(response);
-				return;
+			case EVENT_ID.SEQUENCE: {
+				const tagName = collectionTagName(state, event, "tag:yaml.org,2002:seq");
+				const tag = state.schema.lookupSequenceTag(tagName);
+				if (!tag) throwError$1(state, `unknown sequence tag !<${tagName}>`);
+				const value = tag.create(tagName);
+				const anchor = storeAnchor(state, event, value, tag, tag.carrierIsResult);
+				state.frames.push({
+					kind: "sequence",
+					position: state.position,
+					value,
+					tag,
+					anchor,
+					index: 0
+				});
+				break;
 			}
-
-			// otherwise, use response as-is
-			response = new Response(body, response_options);
-			resolve(response);
-		});
-
-		writeToStream(req, request);
+			case EVENT_ID.MAPPING: {
+				const tagName = collectionTagName(state, event, "tag:yaml.org,2002:map");
+				const tag = state.schema.lookupMappingTag(tagName);
+				if (!tag) throwError$1(state, `unknown mapping tag !<${tagName}>`);
+				const value = tag.create(tagName);
+				const anchor = storeAnchor(state, event, value, tag, tag.carrierIsResult);
+				state.frames.push({
+					kind: "mapping",
+					position: state.position,
+					value,
+					tag,
+					anchor,
+					key: void 0,
+					keyPosition: state.position,
+					hasKey: false,
+					keyIsMerge: false,
+					overridable: null
+				});
+				break;
+			}
+			case EVENT_ID.ALIAS: {
+				if (state.maxAliases !== -1 && ++state.aliasCount > state.maxAliases) throwError$1(state, `aliases exceeded maxAliases (${state.maxAliases})`);
+				const name = state.source.slice(event.anchorStart, event.anchorEnd);
+				const anchor = state.anchors.get(name);
+				if (!anchor) throwError$1(state, `unidentified alias "${name}"`);
+				if (!anchor.isValueFinal) throwError$1(state, `recursive alias "${name}" is not supported for tag ${anchor.tag.tagName} because it uses finalize()`);
+				addValue(state, anchor.value, anchor.tag);
+				break;
+			}
+			case EVENT_ID.POP: {
+				const frame = state.frames.pop();
+				if (frame.kind === "mapping" && frame.hasKey) {
+					state.position = frame.keyPosition;
+					throwError$1(state, "incomplete mapping pair in event stream");
+				}
+				if (frame.kind === "document") state.documents.push(frame.value);
+				else {
+					const value = frame.tag.carrierIsResult ? frame.value : finalizeCollection(state, frame.position, frame.tag, frame.value);
+					if (frame.anchor) {
+						frame.anchor.value = value;
+						frame.anchor.isValueFinal = true;
+					}
+					addValue(state, value, frame.tag);
+				}
+				break;
+			}
+		}
+	}
+	return state.documents;
+}
+//#endregion
+//#region src/parser/parser.ts
+var NO_RANGE$1 = -1;
+var HAS_OWN = Object.prototype.hasOwnProperty;
+var CONTEXT_FLOW_IN = 1;
+var CONTEXT_FLOW_OUT = 2;
+var CONTEXT_BLOCK_IN = 3;
+var CONTEXT_BLOCK_OUT = 4;
+var PATTERN_NON_PRINTABLE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/;
+var PATTERN_FLOW_INDICATORS = /[,\[\]{}]/;
+var PATTERN_TAG_HANDLE = /^(?:!|!!|![0-9A-Za-z-]+!)$/;
+var NS_URI_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$,_.!~*'()\[\]])`;
+var NS_TAG_CHAR = String.raw`(?:%[0-9A-Fa-f]{2}|[0-9A-Za-z\-#;/?:@&=+$.~*'()_])`;
+var PATTERN_TAG_URI = new RegExp(`^(?:${NS_URI_CHAR})*$`);
+var PATTERN_TAG_SUFFIX = new RegExp(`^(?:${NS_TAG_CHAR})+$`);
+var PATTERN_TAG_PREFIX = new RegExp(`^(?:!(?:${NS_URI_CHAR})*|${NS_TAG_CHAR}(?:${NS_URI_CHAR})*)$`);
+var DEFAULT_PARSER_OPTIONS = {
+	filename: "",
+	maxDepth: 100
+};
+function addDocumentEvent(state, explicitStart, explicitEnd) {
+	state.events.push({
+		type: EVENT_ID.DOCUMENT,
+		explicitStart,
+		explicitEnd,
+		directives: state.directives
 	});
 }
+function addSequenceEvent(state, start, anchorStart, anchorEnd, tagStart, tagEnd, style) {
+	state.events.push({
+		type: EVENT_ID.SEQUENCE,
+		start,
+		anchorStart,
+		anchorEnd,
+		tagStart,
+		tagEnd,
+		style
+	});
+}
+function addMappingEvent(state, start, anchorStart, anchorEnd, tagStart, tagEnd, style) {
+	state.events.push({
+		type: EVENT_ID.MAPPING,
+		start,
+		anchorStart,
+		anchorEnd,
+		tagStart,
+		tagEnd,
+		style
+	});
+}
+function insertFlowPairMappingEvent(state, snapshot) {
+	state.events.splice(snapshot.eventsLength, 0, {
+		type: EVENT_ID.MAPPING,
+		start: snapshot.position,
+		anchorStart: NO_RANGE$1,
+		anchorEnd: NO_RANGE$1,
+		tagStart: NO_RANGE$1,
+		tagEnd: NO_RANGE$1,
+		style: COLLECTION_STYLE.FLOW
+	});
+}
+function addScalarEvent(state, valueStart, valueEnd, anchorStart, anchorEnd, tagStart, tagEnd, style, chomping = CHOMPING_MODE.CLIP, indent = -1, fast = false) {
+	state.events.push({
+		type: EVENT_ID.SCALAR,
+		valueStart,
+		valueEnd,
+		anchorStart,
+		anchorEnd,
+		tagStart,
+		tagEnd,
+		style,
+		chomping,
+		indent,
+		fast
+	});
+}
+function addAliasEvent(state, anchorStart, anchorEnd) {
+	state.events.push({
+		type: EVENT_ID.ALIAS,
+		anchorStart,
+		anchorEnd
+	});
+}
+function addPopEvent(state) {
+	state.events.push({ type: EVENT_ID.POP });
+}
+function addEmptyScalarEvent(state) {
+	addScalarEvent(state, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, NO_RANGE$1, SCALAR_STYLE.PLAIN);
+}
+function emptyProperties() {
+	return {
+		anchorStart: NO_RANGE$1,
+		anchorEnd: NO_RANGE$1,
+		tagStart: NO_RANGE$1,
+		tagEnd: NO_RANGE$1
+	};
+}
+function snapshotState(state) {
+	return {
+		position: state.position,
+		line: state.line,
+		lineStart: state.lineStart,
+		lineIndent: state.lineIndent,
+		firstTabInLine: state.firstTabInLine,
+		eventsLength: state.events.length
+	};
+}
+function restoreState(state, snapshot) {
+	state.position = snapshot.position;
+	state.line = snapshot.line;
+	state.lineStart = snapshot.lineStart;
+	state.lineIndent = snapshot.lineIndent;
+	state.firstTabInLine = snapshot.firstTabInLine;
+	state.events.length = snapshot.eventsLength;
+}
+function throwError(state, message) {
+	YAMLException.throwAt(state.input.slice(0, state.length), state.position, message, state.filename);
+}
+function isEol(c) {
+	return c === 10 || c === 13;
+}
+function isWhiteSpace(c) {
+	return c === 9 || c === 32;
+}
+function isWsOrEol(c) {
+	return isWhiteSpace(c) || isEol(c);
+}
+function isWsOrEolOrEnd(c) {
+	return c === 0 || isWsOrEol(c);
+}
+function isFlowIndicator(c) {
+	return c === 44 || c === 91 || c === 93 || c === 123 || c === 125;
+}
+function fromDecimalCode(c) {
+	return c >= 48 && c <= 57 ? c - 48 : -1;
+}
+function fromHexCode(c) {
+	if (c >= 48 && c <= 57) return c - 48;
+	const lc = c | 32;
+	if (lc >= 97 && lc <= 102) return lc - 97 + 10;
+	return -1;
+}
+function escapedHexLen(c) {
+	if (c === 120) return 2;
+	if (c === 117) return 4;
+	if (c === 85) return 8;
+	return 0;
+}
+function isSimpleEscape(c) {
+	return c === 48 || c === 97 || c === 98 || c === 116 || c === 9 || c === 110 || c === 118 || c === 102 || c === 114 || c === 101 || c === 32 || c === 34 || c === 47 || c === 92 || c === 78 || c === 95 || c === 76 || c === 80;
+}
+function consumeLineBreak(state) {
+	if (state.input.charCodeAt(state.position) === 10) state.position++;
+	else {
+		state.position++;
+		if (state.input.charCodeAt(state.position) === 10) state.position++;
+	}
+	state.line++;
+	state.lineStart = state.position;
+	state.lineIndent = 0;
+	state.firstTabInLine = -1;
+}
+function skipSeparationSpace(state, allowComments) {
+	let lineBreaks = 0;
+	let ch = state.input.charCodeAt(state.position);
+	let hasSeparation = state.position === state.lineStart || isWsOrEol(state.input.charCodeAt(state.position - 1));
+	while (ch !== 0) {
+		while (isWhiteSpace(ch)) {
+			hasSeparation = true;
+			if (ch === 9 && state.firstTabInLine === -1) state.firstTabInLine = state.position;
+			ch = state.input.charCodeAt(++state.position);
+		}
+		if (allowComments && hasSeparation && ch === 35) do
+			ch = state.input.charCodeAt(++state.position);
+		while (!isEol(ch) && ch !== 0);
+		if (!isEol(ch)) break;
+		consumeLineBreak(state);
+		lineBreaks++;
+		hasSeparation = true;
+		ch = state.input.charCodeAt(state.position);
+		while (ch === 32) {
+			state.lineIndent++;
+			ch = state.input.charCodeAt(++state.position);
+		}
+	}
+	return lineBreaks;
+}
+function testDocumentSeparator(state, position = state.position) {
+	const ch = state.input.charCodeAt(position);
+	if ((ch === 45 || ch === 46) && ch === state.input.charCodeAt(position + 1) && ch === state.input.charCodeAt(position + 2)) {
+		const following = state.input.charCodeAt(position + 3);
+		return following === 0 || isWsOrEol(following);
+	}
+	return false;
+}
+function skipByteOrderMark(state) {
+	if (state.position === state.lineStart && state.input.charCodeAt(state.position) === 65279) {
+		state.position++;
+		state.lineStart = state.position;
+	}
+}
+function testDocumentBoundary(state) {
+	if (state.position !== state.lineStart) return false;
+	if (testDocumentSeparator(state)) return true;
+	if (state.input.charCodeAt(state.position) !== 65279) return false;
+	const snapshot = snapshotState(state);
+	skipByteOrderMark(state);
+	skipSeparationSpace(state, true);
+	const ch = state.input.charCodeAt(state.position);
+	const result = state.position === state.lineStart && (ch === 37 || ch === 45 && testDocumentSeparator(state));
+	restoreState(state, snapshot);
+	return result;
+}
+function skipUntilLineEnd(state) {
+	let ch = state.input.charCodeAt(state.position);
+	while (ch !== 0 && !isEol(ch)) ch = state.input.charCodeAt(++state.position);
+}
+function checkPrintable(state, start, end) {
+	if (PATTERN_NON_PRINTABLE.test(state.input.slice(start, end))) throwError(state, "the stream contains non-printable characters");
+}
+function readTagProperty(state, props, inFlow) {
+	if (state.input.charCodeAt(state.position) !== 33) return false;
+	if (props.tagStart !== NO_RANGE$1) throwError(state, "duplication of a tag property");
+	const start = state.position;
+	let isVerbatim = false;
+	let isNamed = false;
+	let tagHandle = "!";
+	let ch = state.input.charCodeAt(++state.position);
+	if (ch === 60) {
+		isVerbatim = true;
+		ch = state.input.charCodeAt(++state.position);
+	} else if (ch === 33) {
+		isNamed = true;
+		tagHandle = "!!";
+		ch = state.input.charCodeAt(++state.position);
+	}
+	let suffixStart = state.position;
+	let tagName;
+	if (isVerbatim) {
+		while (ch !== 0 && ch !== 62) ch = state.input.charCodeAt(++state.position);
+		if (ch !== 62) throwError(state, "unexpected end of the stream within a verbatim tag");
+		tagName = state.input.slice(suffixStart, state.position);
+		state.position++;
+	} else {
+		while (ch !== 0 && !isWsOrEol(ch) && !(inFlow && isFlowIndicator(ch))) {
+			if (ch === 33) if (!isNamed) {
+				tagHandle = state.input.slice(suffixStart - 1, state.position + 1);
+				if (!PATTERN_TAG_HANDLE.test(tagHandle)) throwError(state, "named tag handle cannot contain such characters");
+				isNamed = true;
+				suffixStart = state.position + 1;
+			} else throwError(state, "tag suffix cannot contain exclamation marks");
+			ch = state.input.charCodeAt(++state.position);
+		}
+		tagName = state.input.slice(suffixStart, state.position);
+		if (PATTERN_FLOW_INDICATORS.test(tagName)) throwError(state, "tag suffix cannot contain flow indicator characters");
+	}
+	if (tagName && !(isVerbatim ? PATTERN_TAG_URI.test(tagName) : PATTERN_TAG_SUFFIX.test(tagName))) throwError(state, `tag name cannot contain such characters: ${tagName}`);
+	if (!isVerbatim && tagHandle !== "!" && tagHandle !== "!!" && !HAS_OWN.call(state.tagHandlers, tagHandle)) throwError(state, `undeclared tag handle "${tagHandle}"`);
+	props.tagStart = start;
+	props.tagEnd = state.position;
+	return true;
+}
+function readAnchorProperty(state, props) {
+	if (state.input.charCodeAt(state.position) !== 38) return false;
+	if (props.anchorStart !== NO_RANGE$1) throwError(state, "duplication of an anchor property");
+	state.position++;
+	const start = state.position;
+	while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position)) && !isFlowIndicator(state.input.charCodeAt(state.position))) state.position++;
+	if (state.position === start) throwError(state, "name of an anchor node must contain at least one character");
+	props.anchorStart = start;
+	props.anchorEnd = state.position;
+	return true;
+}
+function readAlias(state, props) {
+	if (state.input.charCodeAt(state.position) !== 42) return false;
+	if (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1) throwError(state, "alias node should not have any properties");
+	state.position++;
+	const start = state.position;
+	while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position)) && !isFlowIndicator(state.input.charCodeAt(state.position))) state.position++;
+	if (state.position === start) throwError(state, "name of an alias node must contain at least one character");
+	addAliasEvent(state, start, state.position);
+	return true;
+}
+function readFlowScalarBreak(state, nodeIndent) {
+	skipSeparationSpace(state, false);
+	if (state.lineIndent < nodeIndent) throwError(state, "deficient indentation");
+}
+function readSingleQuotedScalar(state, nodeIndent, props) {
+	if (state.input.charCodeAt(state.position) !== 39) return false;
+	state.position++;
+	const start = state.position;
+	let simple = true;
+	while (state.input.charCodeAt(state.position) !== 0) {
+		const ch = state.input.charCodeAt(state.position);
+		if (ch === 39) {
+			if (state.input.charCodeAt(state.position + 1) === 39) {
+				simple = false;
+				state.position += 2;
+				continue;
+			}
+			const end = state.position;
+			state.position++;
+			addScalarEvent(state, start, end, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.SINGLE_QUOTED, CHOMPING_MODE.CLIP, -1, simple);
+			return true;
+		}
+		if (isEol(ch)) {
+			simple = false;
+			readFlowScalarBreak(state, nodeIndent);
+		} else if (state.position === state.lineStart && testDocumentSeparator(state)) throwError(state, "unexpected end of the document within a single quoted scalar");
+		else if (ch !== 9 && ch < 32) throwError(state, "expected valid JSON character");
+		else state.position++;
+	}
+	throwError(state, "unexpected end of the stream within a single quoted scalar");
+}
+function readDoubleQuotedScalar(state, nodeIndent, props) {
+	if (state.input.charCodeAt(state.position) !== 34) return false;
+	state.position++;
+	const start = state.position;
+	let simple = true;
+	while (state.input.charCodeAt(state.position) !== 0) {
+		const ch = state.input.charCodeAt(state.position);
+		if (ch === 34) {
+			const end = state.position;
+			state.position++;
+			addScalarEvent(state, start, end, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.DOUBLE_QUOTED, CHOMPING_MODE.CLIP, -1, simple);
+			return true;
+		}
+		if (ch === 92) {
+			simple = false;
+			const escaped = state.input.charCodeAt(++state.position);
+			if (isEol(escaped)) readFlowScalarBreak(state, nodeIndent);
+			else if (isSimpleEscape(escaped)) state.position++;
+			else {
+				let hexLength = escapedHexLen(escaped);
+				if (hexLength === 0) throwError(state, "unknown escape sequence");
+				while (hexLength-- > 0) {
+					state.position++;
+					if (fromHexCode(state.input.charCodeAt(state.position)) < 0) throwError(state, "expected hexadecimal character");
+				}
+				state.position++;
+			}
+		} else if (isEol(ch)) {
+			simple = false;
+			readFlowScalarBreak(state, nodeIndent);
+		} else if (state.position === state.lineStart && testDocumentSeparator(state)) throwError(state, "unexpected end of the document within a double quoted scalar");
+		else if (ch !== 9 && ch < 32) throwError(state, "expected valid JSON character");
+		else state.position++;
+	}
+	throwError(state, "unexpected end of the stream within a double quoted scalar");
+}
+function readBlockScalar(state, parentIndent, props) {
+	const ch = state.input.charCodeAt(state.position);
+	let chomping = CHOMPING_MODE.CLIP;
+	let indent = -1;
+	let detectedIndent = false;
+	if (ch !== 124 && ch !== 62) return false;
+	const style = ch === 124 ? SCALAR_STYLE.LITERAL_BLOCK : SCALAR_STYLE.FOLDED_BLOCK;
+	state.position++;
+	while (state.input.charCodeAt(state.position) !== 0) {
+		const current = state.input.charCodeAt(state.position);
+		const digit = fromDecimalCode(current);
+		if (current === 43 || current === 45) {
+			if (chomping !== CHOMPING_MODE.CLIP) throwError(state, "repeat of a chomping mode identifier");
+			chomping = current === 43 ? CHOMPING_MODE.KEEP : CHOMPING_MODE.STRIP;
+			state.position++;
+		} else if (digit >= 0) {
+			if (digit === 0) throwError(state, "bad explicit indentation width of a block scalar; it cannot be less than one");
+			if (detectedIndent) throwError(state, "repeat of an indentation width identifier");
+			indent = parentIndent + digit - 1;
+			detectedIndent = true;
+			state.position++;
+		} else break;
+	}
+	let hadWhitespace = false;
+	while (isWhiteSpace(state.input.charCodeAt(state.position))) {
+		hadWhitespace = true;
+		state.position++;
+	}
+	if (hadWhitespace && state.input.charCodeAt(state.position) === 35) skipUntilLineEnd(state);
+	if (isEol(state.input.charCodeAt(state.position))) consumeLineBreak(state);
+	else if (state.input.charCodeAt(state.position) !== 0) throwError(state, "a line break is expected");
+	let contentIndent = detectedIndent ? indent : -1;
+	let maxLeadingIndent = 0;
+	const valueStart = state.position;
+	let valueEnd = state.position;
+	while (state.input.charCodeAt(state.position) !== 0) {
+		const linePosition = state.position;
+		let column = 0;
+		while (state.input.charCodeAt(linePosition + column) === 32) column++;
+		const first = state.input.charCodeAt(linePosition + column);
+		if (first === 0) {
+			if (contentIndent >= 0) {
+				if (column > contentIndent) valueEnd = linePosition + column;
+			} else if (column > 0) valueEnd = linePosition + column;
+			break;
+		}
+		if (testDocumentBoundary(state)) break;
+		if (!detectedIndent && contentIndent === -1 && isEol(first)) maxLeadingIndent = Math.max(maxLeadingIndent, column);
+		if (!detectedIndent && contentIndent === -1 && !isEol(first)) {
+			if (first === 9 && column < parentIndent) {
+				state.position = linePosition + column;
+				throwError(state, "tab characters must not be used in indentation");
+			}
+			if (column < maxLeadingIndent) {
+				state.position = linePosition + column;
+				throwError(state, "bad indentation of a mapping entry");
+			}
+		}
+		if (contentIndent === -1 && first !== 0 && !isEol(first) && column < parentIndent) {
+			state.lineIndent = column;
+			state.position = linePosition + column;
+			break;
+		}
+		if (!detectedIndent && first !== 0 && !isEol(first) && contentIndent === -1) contentIndent = column;
+		const requiredIndent = contentIndent === -1 ? parentIndent + 1 : contentIndent;
+		if (first !== 0 && !isEol(first) && column < requiredIndent) {
+			state.lineIndent = column;
+			state.position = linePosition + column;
+			break;
+		}
+		skipUntilLineEnd(state);
+		valueEnd = state.position;
+		if (isEol(state.input.charCodeAt(state.position))) {
+			consumeLineBreak(state);
+			valueEnd = state.position;
+		}
+	}
+	checkPrintable(state, valueStart, valueEnd);
+	addScalarEvent(state, valueStart, valueEnd, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, style, chomping, contentIndent);
+	return true;
+}
+function canStartPlainScalar(state, nodeContext) {
+	const ch = state.input.charCodeAt(state.position);
+	const inFlow = nodeContext === CONTEXT_FLOW_IN;
+	if (ch === 0 || isWsOrEol(ch) || ch === 35 || ch === 38 || ch === 42 || ch === 33 || ch === 124 || ch === 62 || ch === 39 || ch === 34 || ch === 37 || ch === 64 || ch === 96 || inFlow && isFlowIndicator(ch)) return false;
+	if (ch === 63 || ch === 45) {
+		const following = state.input.charCodeAt(state.position + 1);
+		if (isWsOrEolOrEnd(following) || inFlow && isFlowIndicator(following)) return false;
+	}
+	return true;
+}
+function readPlainScalar(state, nodeIndent, nodeContext, props) {
+	if (!canStartPlainScalar(state, nodeContext)) return false;
+	const start = state.position;
+	let end = state.position;
+	let ch = state.input.charCodeAt(state.position);
+	const inFlow = nodeContext === CONTEXT_FLOW_IN;
+	let multiline = false;
+	while (ch !== 0) {
+		if (testDocumentBoundary(state)) break;
+		if (ch === 58) {
+			const following = state.input.charCodeAt(state.position + 1);
+			if (isWsOrEolOrEnd(following) || inFlow && isFlowIndicator(following)) break;
+		} else if (ch === 35) {
+			if (isWsOrEol(state.input.charCodeAt(state.position - 1))) break;
+		} else if (inFlow && isFlowIndicator(ch)) break;
+		else if (isEol(ch)) {
+			const savedPosition = state.position;
+			const savedLine = state.line;
+			const savedLineStart = state.lineStart;
+			const savedLineIndent = state.lineIndent;
+			skipSeparationSpace(state, false);
+			if (state.lineIndent >= nodeIndent) {
+				multiline = true;
+				ch = state.input.charCodeAt(state.position);
+				continue;
+			}
+			state.position = savedPosition;
+			state.line = savedLine;
+			state.lineStart = savedLineStart;
+			state.lineIndent = savedLineIndent;
+			break;
+		}
+		if (!isWhiteSpace(ch)) end = state.position + 1;
+		ch = state.input.charCodeAt(++state.position);
+	}
+	if (end === start) return false;
+	checkPrintable(state, start, end);
+	addScalarEvent(state, start, end, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.PLAIN, CHOMPING_MODE.CLIP, -1, !multiline);
+	return true;
+}
+function skipFlowSeparationSpace(state, nodeIndent) {
+	const startLine = state.line;
+	skipSeparationSpace(state, true);
+	if (state.line > startLine && state.lineIndent < nodeIndent || state.firstTabInLine !== -1 && state.lineIndent < nodeIndent) throwError(state, "deficient indentation");
+}
+function readFlowCollection(state, nodeIndent, props) {
+	const ch = state.input.charCodeAt(state.position);
+	const isMapping = ch === 123;
+	const start = state.position;
+	let readNext = true;
+	if (ch !== 91 && ch !== 123) return false;
+	const terminator = isMapping ? 125 : 93;
+	if (isMapping) addMappingEvent(state, start, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.FLOW);
+	else addSequenceEvent(state, start, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.FLOW);
+	state.position++;
+	while (state.input.charCodeAt(state.position) !== 0) {
+		skipFlowSeparationSpace(state, nodeIndent);
+		let ch = state.input.charCodeAt(state.position);
+		if (ch === terminator) {
+			state.position++;
+			addPopEvent(state);
+			return true;
+		} else if (!readNext) throwError(state, "missed comma between flow collection entries");
+		else if (ch === 44) throwError(state, "expected the node content, but found ','");
+		let isPair = false;
+		let isExplicitPair = false;
+		if (ch === 63 && isWsOrEol(state.input.charCodeAt(state.position + 1))) {
+			isPair = isExplicitPair = true;
+			state.position += 1;
+			skipFlowSeparationSpace(state, nodeIndent);
+		}
+		const entryLine = state.line;
+		const entryStart = snapshotState(state);
+		const keyWasRead = parseNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true);
+		skipFlowSeparationSpace(state, nodeIndent);
+		ch = state.input.charCodeAt(state.position);
+		if ((isMapping || isExplicitPair || state.line === entryLine) && ch === 58) {
+			isPair = true;
+			state.position++;
+			skipFlowSeparationSpace(state, nodeIndent);
+			if (!isMapping) {
+				insertFlowPairMappingEvent(state, entryStart);
+				if (!keyWasRead) addEmptyScalarEvent(state);
+			} else if (!keyWasRead) addEmptyScalarEvent(state);
+			if (!parseNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true)) addEmptyScalarEvent(state);
+			skipFlowSeparationSpace(state, nodeIndent);
+			if (!isMapping) addPopEvent(state);
+		} else if (isMapping && isPair) {
+			if (!keyWasRead) addEmptyScalarEvent(state);
+			addEmptyScalarEvent(state);
+		} else if (isMapping) addEmptyScalarEvent(state);
+		else if (isPair) {
+			insertFlowPairMappingEvent(state, entryStart);
+			if (!keyWasRead) addEmptyScalarEvent(state);
+			addEmptyScalarEvent(state);
+			addPopEvent(state);
+		}
+		ch = state.input.charCodeAt(state.position);
+		if (ch === 44) {
+			readNext = true;
+			state.position++;
+		} else readNext = false;
+	}
+	throwError(state, "unexpected end of the stream within a flow collection");
+}
+function readBlockSequence(state, nodeIndent, props) {
+	if (state.firstTabInLine !== -1 || state.input.charCodeAt(state.position) !== 45 || !isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) return false;
+	addSequenceEvent(state, state.position, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.BLOCK);
+	while (state.input.charCodeAt(state.position) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) {
+		if (state.firstTabInLine !== -1) {
+			state.position = state.firstTabInLine;
+			throwError(state, "tab characters must not be used in indentation");
+		}
+		const entryLine = state.line;
+		state.position++;
+		const hadBreak = skipSeparationSpace(state, true) > 0;
+		if (state.firstTabInLine !== -1 && state.input.charCodeAt(state.position) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) throwError(state, "bad indentation of a sequence entry");
+		if (hadBreak && state.lineIndent <= nodeIndent) addEmptyScalarEvent(state);
+		else parseNode(state, nodeIndent, CONTEXT_BLOCK_IN, false, true);
+		skipSeparationSpace(state, true);
+		if (state.lineIndent < nodeIndent || state.position >= state.length) break;
+		if (state.lineIndent > nodeIndent) throwError(state, "bad indentation of a sequence entry");
+		if (state.line === entryLine && state.input.charCodeAt(state.position) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 1))) throwError(state, "bad indentation of a sequence entry");
+	}
+	addPopEvent(state);
+	return true;
+}
+function readBlockMapping(state, nodeIndent, flowIndent, props) {
+	let atExplicitKey = false;
+	let detected = false;
+	let mappingOpened = false;
+	let pendingExplicitKey = false;
+	if (state.firstTabInLine !== -1) return false;
+	let ch = state.input.charCodeAt(state.position);
+	while (ch !== 0) {
+		if (!atExplicitKey && state.firstTabInLine !== -1) {
+			state.position = state.firstTabInLine;
+			throwError(state, "tab characters must not be used in indentation");
+		}
+		const following = state.input.charCodeAt(state.position + 1);
+		const entryLine = state.line;
+		if ((ch === 63 || ch === 58) && isWsOrEolOrEnd(following)) {
+			if (!mappingOpened) {
+				addMappingEvent(state, state.position, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.BLOCK);
+				mappingOpened = true;
+			}
+			if (ch === 63) {
+				if (atExplicitKey) addEmptyScalarEvent(state);
+				detected = true;
+				atExplicitKey = true;
+			} else if (atExplicitKey) atExplicitKey = false;
+			else {
+				addEmptyScalarEvent(state);
+				detected = true;
+				atExplicitKey = false;
+			}
+			state.position += 1;
+			pendingExplicitKey = true;
+		} else {
+			if (atExplicitKey) {
+				addEmptyScalarEvent(state);
+				atExplicitKey = false;
+			}
+			const beforeKey = snapshotState(state);
+			if (!parseNode(state, flowIndent, CONTEXT_FLOW_OUT, false, true)) break;
+			if (state.line === entryLine) {
+				ch = state.input.charCodeAt(state.position);
+				while (isWhiteSpace(ch)) ch = state.input.charCodeAt(++state.position);
+				if (ch === 58) {
+					ch = state.input.charCodeAt(++state.position);
+					if (!isWsOrEolOrEnd(ch)) throwError(state, "a whitespace character is expected after the key-value separator within a block mapping");
+					if (!mappingOpened) {
+						restoreState(state, beforeKey);
+						addMappingEvent(state, beforeKey.position, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, COLLECTION_STYLE.BLOCK);
+						mappingOpened = true;
+						parseNode(state, flowIndent, CONTEXT_FLOW_OUT, false, true);
+						ch = state.input.charCodeAt(state.position);
+						while (isWhiteSpace(ch)) ch = state.input.charCodeAt(++state.position);
+						state.position++;
+					}
+					detected = true;
+					atExplicitKey = false;
+					pendingExplicitKey = false;
+				} else if (detected) throwError(state, "expected ':' after a mapping key");
+				else {
+					if (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1) {
+						restoreState(state, beforeKey);
+						return false;
+					}
+					return true;
+				}
+			} else if (detected) throwError(state, "can not read a block mapping entry; a multiline key may not be an implicit key");
+			else {
+				if (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1) {
+					restoreState(state, beforeKey);
+					return false;
+				}
+				return true;
+			}
+		}
+		if (parseNode(state, nodeIndent, CONTEXT_BLOCK_OUT, true, pendingExplicitKey)) pendingExplicitKey = false;
+		if (!atExplicitKey) {
+			if (pendingExplicitKey) {
+				addEmptyScalarEvent(state);
+				pendingExplicitKey = false;
+			}
+		}
+		skipSeparationSpace(state, true);
+		ch = state.input.charCodeAt(state.position);
+		if ((state.line === entryLine || state.lineIndent > nodeIndent) && ch !== 0) throwError(state, "bad indentation of a mapping entry");
+		else if (state.lineIndent < nodeIndent) break;
+	}
+	if (!detected) return false;
+	if (atExplicitKey) addEmptyScalarEvent(state);
+	if (mappingOpened) addPopEvent(state);
+	return true;
+}
+function parseNode(state, parentIndent, nodeContext, allowToSeek, allowCompact, allowPropertyMapping = true) {
+	if (state.depth >= state.maxDepth) throwError(state, `nesting exceeded maxDepth (${state.maxDepth})`);
+	state.depth++;
+	let indentStatus = 1;
+	let atNewLine = false;
+	let hasContent = false;
+	let propertyStart = null;
+	const props = emptyProperties();
+	let allowBlockScalars = nodeContext === CONTEXT_BLOCK_OUT || nodeContext === CONTEXT_BLOCK_IN;
+	let allowBlockCollections = allowBlockScalars;
+	const allowBlockStyles = allowBlockScalars;
+	if (allowToSeek && skipSeparationSpace(state, true)) {
+		atNewLine = true;
+		if (state.lineIndent > parentIndent) indentStatus = 1;
+		else if (state.lineIndent === parentIndent) indentStatus = 0;
+		else indentStatus = -1;
+	}
+	if (indentStatus === 1) while (true) {
+		const ch = state.input.charCodeAt(state.position);
+		const propertyState = snapshotState(state);
+		if (atNewLine && indentStatus !== 1 && (ch === 33 || ch === 38)) break;
+		if (atNewLine && allowBlockStyles && (props.tagStart !== NO_RANGE$1 || props.anchorStart !== NO_RANGE$1) && (ch === 33 || ch === 38)) {
+			var _state$events$fallbac;
+			const fallbackState = snapshotState(state);
+			const flowIndent = parentIndent + 1;
+			if (readBlockMapping(state, state.position - state.lineStart, flowIndent, props) && ((_state$events$fallbac = state.events[fallbackState.eventsLength]) === null || _state$events$fallbac === void 0 ? void 0 : _state$events$fallbac.type) === EVENT_ID.MAPPING) {
+				state.depth--;
+				return true;
+			}
+			restoreState(state, fallbackState);
+		}
+		if (atNewLine && (ch === 33 && props.tagStart !== NO_RANGE$1 || ch === 38 && props.anchorStart !== NO_RANGE$1)) break;
+		if (!readTagProperty(state, props, nodeContext === CONTEXT_FLOW_IN) && !readAnchorProperty(state, props)) break;
+		if (propertyStart === null) propertyStart = propertyState;
+		if (skipSeparationSpace(state, true)) {
+			atNewLine = true;
+			allowBlockCollections = allowBlockStyles;
+			if (state.lineIndent > parentIndent) indentStatus = 1;
+			else if (state.lineIndent === parentIndent) indentStatus = 0;
+			else indentStatus = -1;
+		} else allowBlockCollections = false;
+	}
+	if (allowBlockCollections) allowBlockCollections = atNewLine || allowCompact;
+	if (indentStatus === 1 || nodeContext === CONTEXT_BLOCK_OUT) {
+		const flowIndent = nodeContext === CONTEXT_FLOW_IN || nodeContext === CONTEXT_FLOW_OUT ? parentIndent : parentIndent + 1;
+		const blockIndent = state.position - state.lineStart;
+		if (indentStatus === 1) if (allowBlockCollections && (readBlockSequence(state, blockIndent, props) || readBlockMapping(state, blockIndent, flowIndent, props)) || readFlowCollection(state, flowIndent, props)) hasContent = true;
+		else {
+			const ch = state.input.charCodeAt(state.position);
+			if (propertyStart !== null && allowPropertyMapping && allowBlockStyles && !allowBlockCollections && ch !== 124 && ch !== 62) {
+				var _state$events$fallbac2;
+				const fallbackState = snapshotState(state);
+				const propertyIndent = propertyStart.position - propertyStart.lineStart;
+				restoreState(state, propertyStart);
+				if (readBlockMapping(state, propertyIndent, flowIndent, emptyProperties()) && ((_state$events$fallbac2 = state.events[fallbackState.eventsLength]) === null || _state$events$fallbac2 === void 0 ? void 0 : _state$events$fallbac2.type) === EVENT_ID.MAPPING) hasContent = true;
+				else restoreState(state, fallbackState);
+			}
+			if (!hasContent && (allowBlockScalars && readBlockScalar(state, flowIndent, props) || readSingleQuotedScalar(state, flowIndent, props) || readDoubleQuotedScalar(state, flowIndent, props) || readAlias(state, props) || readPlainScalar(state, flowIndent, nodeContext, props))) hasContent = true;
+		}
+		else if (indentStatus === 0) hasContent = allowBlockCollections && readBlockSequence(state, blockIndent, props);
+	}
+	allowBlockScalars = allowBlockScalars && !hasContent;
+	if (!hasContent && (props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1 || allowBlockScalars)) {
+		addScalarEvent(state, NO_RANGE$1, NO_RANGE$1, props.anchorStart, props.anchorEnd, props.tagStart, props.tagEnd, SCALAR_STYLE.PLAIN);
+		hasContent = true;
+	}
+	state.depth--;
+	return hasContent || props.anchorStart !== NO_RANGE$1 || props.tagStart !== NO_RANGE$1;
+}
+function readDirective(state) {
+	if (state.lineIndent > 0 || state.input.charCodeAt(state.position) !== 37) return false;
+	state.position++;
+	const nameStart = state.position;
+	while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position))) state.position++;
+	const name = state.input.slice(nameStart, state.position);
+	const args = [];
+	if (name.length === 0) throwError(state, "directive name must not be less than one character in length");
+	while (state.input.charCodeAt(state.position) !== 0 && !isEol(state.input.charCodeAt(state.position))) {
+		while (isWhiteSpace(state.input.charCodeAt(state.position))) state.position++;
+		if (state.input.charCodeAt(state.position) === 35 || isEol(state.input.charCodeAt(state.position)) || state.input.charCodeAt(state.position) === 0) break;
+		const start = state.position;
+		while (state.input.charCodeAt(state.position) !== 0 && !isWsOrEol(state.input.charCodeAt(state.position))) state.position++;
+		args.push(state.input.slice(start, state.position));
+	}
+	if (isEol(state.input.charCodeAt(state.position))) consumeLineBreak(state);
+	if (name === "YAML") {
+		if (state.directives.some((directive) => directive.kind === "yaml")) throwError(state, "duplication of %YAML directive");
+		if (args.length !== 1) throwError(state, "YAML directive accepts exactly one argument");
+		const match = /^([0-9]+)\.([0-9]+)$/.exec(args[0]);
+		if (match === null) throwError(state, "ill-formed argument of the YAML directive");
+		if (parseInt(match[1], 10) !== 1) throwError(state, "unacceptable YAML version of the document");
+		state.directives.push({
+			kind: "yaml",
+			version: args[0]
+		});
+	} else if (name === "TAG") {
+		if (args.length !== 2) throwError(state, "TAG directive accepts exactly two arguments");
+		const [handle, prefix] = args;
+		if (!PATTERN_TAG_HANDLE.test(handle)) throwError(state, "ill-formed tag handle (first argument) of the TAG directive");
+		if (HAS_OWN.call(state.tagHandlers, handle)) throwError(state, `there is a previously declared suffix for "${handle}" tag handle`);
+		if (!PATTERN_TAG_PREFIX.test(prefix)) throwError(state, "ill-formed tag prefix (second argument) of the TAG directive");
+		state.tagHandlers[handle] = prefix;
+		state.directives.push({
+			kind: "tag",
+			handle,
+			prefix
+		});
+	}
+	return true;
+}
+function readDocument(state) {
+	state.directives = [];
+	state.tagHandlers = Object.create(null);
+	let hasDirectives = false;
+	skipSeparationSpace(state, true);
+	while (readDirective(state)) {
+		hasDirectives = true;
+		skipSeparationSpace(state, true);
+	}
+	let explicitStart = false;
+	let explicitEnd = false;
+	let allowCompact = true;
+	if (state.lineIndent === 0 && state.input.charCodeAt(state.position) === 45 && state.input.charCodeAt(state.position + 1) === 45 && state.input.charCodeAt(state.position + 2) === 45 && isWsOrEolOrEnd(state.input.charCodeAt(state.position + 3))) {
+		explicitStart = true;
+		const markerLine = state.line;
+		state.position += 3;
+		skipSeparationSpace(state, true);
+		allowCompact = state.line > markerLine;
+	} else if (hasDirectives) throwError(state, "directives end mark is expected");
+	const documentEventIndex = state.events.length;
+	if (!explicitStart && state.position === state.lineStart && state.input.charCodeAt(state.position) === 46 && testDocumentSeparator(state)) {
+		state.position += 3;
+		skipSeparationSpace(state, true);
+		return;
+	}
+	addDocumentEvent(state, explicitStart, false);
+	if (!parseNode(state, state.lineIndent - 1, CONTEXT_BLOCK_OUT, false, allowCompact, allowCompact)) addEmptyScalarEvent(state);
+	skipSeparationSpace(state, true);
+	if (state.position === state.lineStart && testDocumentSeparator(state)) {
+		explicitEnd = state.input.charCodeAt(state.position) === 46;
+		if (explicitEnd) {
+			const markerLine = state.line;
+			state.position += 3;
+			skipSeparationSpace(state, true);
+			if (state.line === markerLine && state.position < state.length) throwError(state, "end of the stream or a document separator is expected");
+		}
+	}
+	const documentEvent = state.events[documentEventIndex];
+	if ((documentEvent === null || documentEvent === void 0 ? void 0 : documentEvent.type) === EVENT_ID.DOCUMENT) documentEvent.explicitEnd = explicitEnd;
+	addPopEvent(state);
+	if (!explicitEnd && state.position < state.length && !testDocumentBoundary(state)) throwError(state, "end of the stream or a document separator is expected");
+}
 /**
- * Redirect code matching
- *
- * @param   Number   code  Status code
- * @return  Boolean
- */
-fetch.isRedirect = function (code) {
-	return code === 301 || code === 302 || code === 303 || code === 307 || code === 308;
+* Parses YAML into a flat event stream referencing source text by offsets.
+*
+* @category Events
+*/
+function parseEvents(input, options) {
+	const length = input.length;
+	const state = _objectSpread2(_objectSpread2(_objectSpread2({}, DEFAULT_PARSER_OPTIONS), options), {}, {
+		input: `${input}\0`,
+		length,
+		position: 0,
+		line: 0,
+		lineStart: 0,
+		lineIndent: 0,
+		firstTabInLine: -1,
+		depth: 0,
+		directives: [],
+		tagHandlers: Object.create(null),
+		events: []
+	});
+	const nullpos = input.indexOf("\0");
+	if (nullpos !== -1) YAMLException.throwAt(input, nullpos, "null byte is not allowed in input", state.filename);
+	while (state.position < state.length) {
+		skipByteOrderMark(state);
+		skipSeparationSpace(state, true);
+		if (state.position >= state.length) break;
+		const documentStart = state.position;
+		readDocument(state);
+		if (state.position === documentStart)
+ /* c8 ignore next */
+		throwError(state, "can not read a document");
+	}
+	return state.events;
+}
+//#endregion
+//#region src/load.ts
+var DEFAULT_LOAD_OPTIONS = _objectSpread2(_objectSpread2({}, DEFAULT_PARSER_OPTIONS), DEFAULT_CONSTRUCTOR_OPTIONS);
+function loadDocuments(input, options = {}) {
+	const opts = _objectSpread2(_objectSpread2({}, DEFAULT_LOAD_OPTIONS), options);
+	const source = String(input);
+	const PARSER_OPT_KEYS = Object.keys(DEFAULT_PARSER_OPTIONS);
+	const CONSTRUCTOR_OPT_KEYS = Object.keys(DEFAULT_CONSTRUCTOR_OPTIONS);
+	return constructFromEvents(parseEvents(source, pick(opts, PARSER_OPT_KEYS)), _objectSpread2(_objectSpread2({}, pick(opts, CONSTRUCTOR_OPT_KEYS)), {}, { source }));
+}
+function loadAll(input, iteratorOrOptions, options) {
+	let iterator = null;
+	if (typeof iteratorOrOptions === "function") iterator = iteratorOrOptions;
+	else if (iteratorOrOptions !== null && typeof iteratorOrOptions === "object") options = iteratorOrOptions;
+	const documents = loadDocuments(input, options);
+	if (iterator === null) return documents;
+	for (const document of documents) iterator(document);
+}
+/**
+* Parses `string` as a single YAML document. Throws {@link YAMLException} on
+* error. This function does not understand multi-document or empty sources; it
+* throws an exception on those.
+*
+* > [!NOTE]
+* > 1. When processing untrusted input, see the
+* >    [security considerations](../docs/safety.md).
+* > 2. All exceptions MUST be caught, not just {@link YAMLException}.
+* > 3. The default {@link CORE_SCHEMA} comes without the `!!merge` tag. You can
+* >    easily enable it if needed.
+* > 4. The default {@link mapTag} is `{}`-object based, with known limitations
+* >    (see description). For full compatibility use {@link realMapTag}
+* >    instead (it uses native JS `Map`).
+*
+* @example
+* Enable {@link mergeTag} and {@link realMapTag}:
+*
+* ```javascript
+* import { load, CORE_SCHEMA, mergeTag, realMapTag } from 'js-yaml'
+*
+* try {
+*   load(data, { schema: CORE_SCHEMA.withTags(mergeTag, realMapTag) })
+* } catch (e) {
+*   console.error(e)
+* }
+* ```
+*
+* @category Main
+*/
+function load(input, options) {
+	const documents = loadDocuments(input, options);
+	if (documents.length === 0) throw new YAMLException("expected a document, but the input is empty");
+	if (documents.length === 1) return documents[0];
+	throw new YAMLException("expected a single document in the stream, but found more");
+}
+//#endregion
+//#region src/ast/from_js.ts
+var INVALID = Symbol("INVALID");
+function buildRepresentTypes(schema) {
+	const defaultTags = new Set([
+		schema.defaultScalarTag,
+		schema.defaultSequenceTag,
+		schema.defaultMappingTag
+	].filter((t) => t !== void 0));
+	const implicitScalars = schema.implicitScalarTags;
+	const explicitTags = schema.tags.filter((t) => !(t.nodeKind === "scalar" && t.implicit) && !defaultTags.has(t));
+	const defaultTagsLast = schema.tags.filter((t) => defaultTags.has(t));
+	return [
+		...implicitScalars.map((tag) => ({
+			tag,
+			implicitTag: true
+		})),
+		...explicitTags.map((tag) => ({
+			tag,
+			implicitTag: false
+		})),
+		...defaultTagsLast.map((tag) => ({
+			tag,
+			implicitTag: true
+		}))
+	];
+}
+function matchTag(state, object) {
+	for (let index = 0, length = state.representTypes.length; index < length; index += 1) {
+		const { tag, implicitTag } = state.representTypes[index];
+		if (tag.identify(object)) {
+			let tagName;
+			if (tag.matchByTagPrefix) tagName = tag.representTagName(object);
+			else tagName = tag.tagName;
+			return {
+				tag,
+				tagName,
+				implicitTag
+			};
+		}
+	}
+	return null;
+}
+function build(state, object) {
+	if (!state.noRefs && object !== null && typeof object === "object") {
+		const existing = state.refs.get(object);
+		if (existing) {
+			if (existing.anchor === void 0) existing.anchor = `ref_${state.refCounter++}`;
+			return {
+				kind: "alias",
+				anchor: existing.anchor
+			};
+		}
+	}
+	const matched = matchTag(state, object);
+	if (!matched) {
+		if (object === void 0) return INVALID;
+		if (state.skipInvalid) return INVALID;
+		throw new YAMLException(`unacceptable kind of an object to dump ${Object.prototype.toString.call(object)}`);
+	}
+	const { tag, tagName, implicitTag } = matched;
+	const nodeTagName = implicitTag ? tagName : tagNameShort(tagName);
+	if (tag.nodeKind === "scalar") return {
+		kind: "scalar",
+		tag: nodeTagName,
+		tagged: !implicitTag,
+		style: SCALAR_STYLE.PLAIN,
+		value: tag.represent(object)
+	};
+	if (tag.nodeKind === "sequence") {
+		const container = tag.represent(object);
+		const node = {
+			kind: "sequence",
+			tag: nodeTagName,
+			tagged: !implicitTag,
+			style: COLLECTION_STYLE.BLOCK,
+			items: []
+		};
+		if (!state.noRefs) state.refs.set(object, node);
+		for (let index = 0, length = container.length; index < length; index += 1) {
+			let item = build(state, container[index]);
+			if (item === INVALID && container[index] === void 0) item = build(state, null);
+			if (item === INVALID) continue;
+			node.items.push(item);
+		}
+		return node;
+	}
+	const map = tag.represent(object);
+	const node = {
+		kind: "mapping",
+		tag: nodeTagName,
+		tagged: !implicitTag,
+		style: COLLECTION_STYLE.BLOCK,
+		items: []
+	};
+	if (!state.noRefs) state.refs.set(object, node);
+	for (const [objectKey, objectValue] of map) {
+		const key = build(state, objectKey);
+		if (key === INVALID) continue;
+		const value = build(state, objectValue);
+		if (value === INVALID) continue;
+		node.items.push({
+			key,
+			value
+		});
+	}
+	return node;
+}
+/**
+* Convert JS object to AST. A JS value is one YAML document. An unrepresentable
+* root becomes an empty document, which the presenter renders as an empty
+* string.
+*
+* @category AST
+*/
+function jsToAst(input, schema, options = {}) {
+	var _options$noRefs, _options$skipInvalid;
+	const root = build({
+		representTypes: buildRepresentTypes(schema),
+		noRefs: (_options$noRefs = options.noRefs) !== null && _options$noRefs !== void 0 ? _options$noRefs : false,
+		skipInvalid: (_options$skipInvalid = options.skipInvalid) !== null && _options$skipInvalid !== void 0 ? _options$skipInvalid : false,
+		refs: /* @__PURE__ */ new Map(),
+		refCounter: 0
+	}, input);
+	return [{
+		contents: root === INVALID ? null : root,
+		directives: []
+	}];
+}
+//#endregion
+//#region src/ast/visit.ts
+/**
+* Return from a visitor to stop the whole traversal.
+*
+* @category AST
+*/
+var VISIT_BREAK = Symbol("visit:break");
+/**
+* Return from a visitor to skip the current node's children.
+*
+* @category AST
+*/
+var VISIT_SKIP = Symbol("visit:skip");
+function visitNode(node, visitor, ctx) {
+	const control = visitor(node, ctx);
+	if (control === VISIT_BREAK) return true;
+	if (control === VISIT_SKIP) return false;
+	const depth = ctx.depth + 1;
+	switch (node.kind) {
+		case "sequence":
+			for (const item of node.items) if (visitNode(item, visitor, {
+				depth,
+				parent: node,
+				isKey: false
+			})) return true;
+			break;
+		case "mapping":
+			for (const { key, value } of node.items) {
+				if (visitNode(key, visitor, {
+					depth,
+					parent: node,
+					isKey: true
+				})) return true;
+				if (visitNode(value, visitor, {
+					depth,
+					parent: node,
+					isKey: false
+				})) return true;
+			}
+			break;
+	}
+	return false;
+}
+/**
+* Walk every node in the documents, calling {@link Visitor} once per
+* node (pre-order).
+*
+* @category AST
+*/
+function visit(documents, visitor) {
+	for (const doc of documents) if (doc.contents && visitNode(doc.contents, visitor, {
+		depth: 0,
+		parent: null,
+		isKey: false
+	})) return;
+}
+//#endregion
+//#region src/ast/styler_defaults.ts
+function hasBit(mask, bit) {
+	return (mask & 1 << bit) !== 0;
+}
+/**
+* Default scalar styling rules in application order.
+* See [Scalar styling](../../docs/scalar_styling.md) for usage details.
+*
+* @category AST
+*/
+var DEFAULT_SCALAR_STYLE_RULES = {
+	applyQuoteFlowKeysOption,
+	doubleQuoteForInvisibles,
+	doubleQuoteWhitespaceOnly,
+	applyForceQuotesOption,
+	tryLongOrMultilineAsBlock,
+	quoteInvalidPlain,
+	fallbackToDoubleQuoted
 };
-
-// expose Promise
-fetch.Promise = global.Promise;
-
-module.exports = exports = fetch;
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.default = exports;
-exports.Headers = Headers;
-exports.Request = Request;
-exports.Response = Response;
-exports.FetchError = FetchError;
-
-
-/***/ }),
-
-/***/ 1223:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-var wrappy = __nccwpck_require__(2940)
-module.exports = wrappy(once)
-module.exports.strict = wrappy(onceStrict)
-
-once.proto = once(function () {
-  Object.defineProperty(Function.prototype, 'once', {
-    value: function () {
-      return once(this)
-    },
-    configurable: true
-  })
-
-  Object.defineProperty(Function.prototype, 'onceStrict', {
-    value: function () {
-      return onceStrict(this)
-    },
-    configurable: true
-  })
-})
-
-function once (fn) {
-  var f = function () {
-    if (f.called) return f.value
-    f.called = true
-    return f.value = fn.apply(this, arguments)
-  }
-  f.called = false
-  return f
+function _preferredQuotedStyle(layout) {
+	if (layout.presenterOptions.quoteStyle === "single" && hasBit(layout.allowedStylesMask, SCALAR_STYLE.SINGLE_QUOTED)) return SCALAR_STYLE.SINGLE_QUOTED;
+	return SCALAR_STYLE.DOUBLE_QUOTED;
 }
-
-function onceStrict (fn) {
-  var f = function () {
-    if (f.called)
-      throw new Error(f.onceError)
-    f.called = true
-    return f.value = fn.apply(this, arguments)
-  }
-  var name = fn.name || 'Function wrapped with `once`'
-  f.onceError = name + " shouldn't be called more than once"
-  f.called = false
-  return f
+function applyQuoteFlowKeysOption(layout) {
+	if (!layout.presenterOptions.quoteFlowKeys) return;
+	if (!layout.isKey || !layout.flowOnly || layout.style !== SCALAR_STYLE.PLAIN) return;
+	layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
 }
-
-
-/***/ }),
-
-/***/ 4294:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-module.exports = __nccwpck_require__(4219);
-
-
-/***/ }),
-
-/***/ 4219:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-
-var net = __nccwpck_require__(1631);
-var tls = __nccwpck_require__(4016);
-var http = __nccwpck_require__(8605);
-var https = __nccwpck_require__(7211);
-var events = __nccwpck_require__(8614);
-var assert = __nccwpck_require__(2357);
-var util = __nccwpck_require__(1669);
-
-
-exports.httpOverHttp = httpOverHttp;
-exports.httpsOverHttp = httpsOverHttp;
-exports.httpOverHttps = httpOverHttps;
-exports.httpsOverHttps = httpsOverHttps;
-
-
-function httpOverHttp(options) {
-  var agent = new TunnelingAgent(options);
-  agent.request = http.request;
-  return agent;
+function doubleQuoteForInvisibles(layout) {
+	if (layout.style === SCALAR_STYLE.PLAIN && /[\t\x7F-\xA0\u2028\u2029\uFEFF\uFFFE\uFFFF]/.test(layout.node.value)) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
 }
-
-function httpsOverHttp(options) {
-  var agent = new TunnelingAgent(options);
-  agent.request = http.request;
-  agent.createSocket = createSecureSocket;
-  agent.defaultPort = 443;
-  return agent;
+function doubleQuoteWhitespaceOnly(layout) {
+	if (layout.style === SCALAR_STYLE.PLAIN && /^\s+$/.test(layout.node.value)) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
 }
-
-function httpOverHttps(options) {
-  var agent = new TunnelingAgent(options);
-  agent.request = https.request;
-  return agent;
+function applyForceQuotesOption(layout) {
+	if (!layout.presenterOptions.forceQuotes) return;
+	if (layout.isKey || layout.style !== SCALAR_STYLE.PLAIN) return;
+	if (layout.node.tag !== layout.presenterOptions.schema.defaultScalarTag.tagName) return;
+	layout.style = layout.node.value.includes("\n") ? SCALAR_STYLE.DOUBLE_QUOTED : _preferredQuotedStyle(layout);
 }
-
-function httpsOverHttps(options) {
-  var agent = new TunnelingAgent(options);
-  agent.request = https.request;
-  agent.createSocket = createSecureSocket;
-  agent.defaultPort = 443;
-  return agent;
+function tryLongOrMultilineAsBlock(layout) {
+	if (layout.style !== SCALAR_STYLE.PLAIN || layout.isKey) return;
+	const value = layout.node.value;
+	const multiline = value.indexOf("\n") !== -1;
+	if (!hasBit(layout.allowedStylesMask, SCALAR_STYLE.LITERAL_BLOCK)) {
+		if (multiline) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
+		return;
+	}
+	const w = layout.presenterOptions.lineWidth;
+	if (w === -1) {
+		if (multiline) layout.style = SCALAR_STYLE.LITERAL_BLOCK;
+		return;
+	}
+	const availableWidth = Math.max(Math.min(w, 40), w - layout.shiftOfContent);
+	let position = 0;
+	let shouldFold = false;
+	while (position <= value.length) {
+		let lineEnd = value.length;
+		const nextLineBreak = value.indexOf("\n", position);
+		if (nextLineBreak !== -1) lineEnd = nextLineBreak;
+		const line = value.slice(position, lineEnd);
+		if (line.length > availableWidth && line[0] !== " " && / [^ \t]/.test(line)) shouldFold = true;
+		if (nextLineBreak === -1) break;
+		position = nextLineBreak + 1;
+	}
+	if (shouldFold) layout.style = SCALAR_STYLE.FOLDED_BLOCK;
+	else if (multiline) layout.style = SCALAR_STYLE.LITERAL_BLOCK;
 }
-
-
-function TunnelingAgent(options) {
-  var self = this;
-  self.options = options || {};
-  self.proxyOptions = self.options.proxy || {};
-  self.maxSockets = self.options.maxSockets || http.Agent.defaultMaxSockets;
-  self.requests = [];
-  self.sockets = [];
-
-  self.on('free', function onFree(socket, host, port, localAddress) {
-    var options = toOptions(host, port, localAddress);
-    for (var i = 0, len = self.requests.length; i < len; ++i) {
-      var pending = self.requests[i];
-      if (pending.host === options.host && pending.port === options.port) {
-        // Detect the request to connect same origin server,
-        // reuse the connection.
-        self.requests.splice(i, 1);
-        pending.request.onSocket(socket);
-        return;
-      }
-    }
-    socket.destroy();
-    self.removeSocket(socket);
-  });
+function quoteInvalidPlain(layout) {
+	if (layout.style === SCALAR_STYLE.PLAIN && !hasBit(layout.allowedStylesMask, SCALAR_STYLE.PLAIN)) layout.style = _preferredQuotedStyle(layout);
 }
-util.inherits(TunnelingAgent, events.EventEmitter);
-
-TunnelingAgent.prototype.addRequest = function addRequest(req, host, port, localAddress) {
-  var self = this;
-  var options = mergeOptions({request: req}, self.options, toOptions(host, port, localAddress));
-
-  if (self.sockets.length >= this.maxSockets) {
-    // We are over limit so we'll add it to the queue.
-    self.requests.push(options);
-    return;
-  }
-
-  // If we are under maxSockets create a new one.
-  self.createSocket(options, function(socket) {
-    socket.on('free', onFree);
-    socket.on('close', onCloseOrRemove);
-    socket.on('agentRemove', onCloseOrRemove);
-    req.onSocket(socket);
-
-    function onFree() {
-      self.emit('free', socket, options);
-    }
-
-    function onCloseOrRemove(err) {
-      self.removeSocket(socket);
-      socket.removeListener('free', onFree);
-      socket.removeListener('close', onCloseOrRemove);
-      socket.removeListener('agentRemove', onCloseOrRemove);
-    }
-  });
+function fallbackToDoubleQuoted(layout) {
+	if (!hasBit(layout.allowedStylesMask, layout.style)) layout.style = SCALAR_STYLE.DOUBLE_QUOTED;
+}
+//#endregion
+//#region src/ast/scalar_styler.ts
+function setBit(mask, bit) {
+	return mask | 1 << bit;
+}
+var SRC_C_PRINTABLE = "[\\x09\\x0A\\x0D\\x20-\\x7E\\x85\\xA0-\\uD7FF\\uE000-\\uFFFD\\u{10000}-\\u{10FFFF}]";
+var SRC_B_CHAR = "[\\n\\r]";
+var SRC_C_BYTE_ORDER_MARK = "\\uFEFF";
+var SRC_S_WHITE = "[ \\t]";
+var SRC_NB_CHAR = `(?:(?!(?:${SRC_B_CHAR}|${SRC_C_BYTE_ORDER_MARK}))${SRC_C_PRINTABLE})`;
+var SRC_NS_CHAR = `(?:(?!${SRC_S_WHITE})${SRC_NB_CHAR})`;
+var SRC_NB_JSON = "[\\x09\\x20-\\uD7FF\\uE000-\\uFFFF\\u{10000}-\\u{10FFFF}]";
+var SRC_C_INDICATOR = "[-?:,\\[\\]{}#&*!|>'\"%@`]";
+var SRC_C_FLOW_INDICATOR = "[,\\[\\]{}]";
+var SRC_NS_PLAIN_SAFE_FLOW_OUT = SRC_NS_CHAR;
+var SRC_NS_PLAIN_SAFE_FLOW_IN = `(?:(?!${SRC_C_FLOW_INDICATOR})${SRC_NS_CHAR})`;
+var SRC_NS_PLAIN_FIRST_FLOW_OUT = `(?:(?:(?!${SRC_C_INDICATOR})${SRC_NS_CHAR})|[?:-](?=${SRC_NS_PLAIN_SAFE_FLOW_OUT}))`;
+var SRC_NS_PLAIN_FIRST_FLOW_IN = `(?:(?:(?!${SRC_C_INDICATOR})${SRC_NS_CHAR})|[?:-](?=${SRC_NS_PLAIN_SAFE_FLOW_IN}))`;
+var SRC_NS_PLAIN_CHAR_FLOW_OUT = `(?:(?:(?![:#])${SRC_NS_PLAIN_SAFE_FLOW_OUT})|:(?=${SRC_NS_PLAIN_SAFE_FLOW_OUT}))#*`;
+var SRC_NS_PLAIN_CHAR_FLOW_IN = `(?:(?:(?![:#])${SRC_NS_PLAIN_SAFE_FLOW_IN})|:(?=${SRC_NS_PLAIN_SAFE_FLOW_IN}))#*`;
+var SRC_NB_NS_PLAIN_IN_LINE_FLOW_OUT = `(?:${SRC_S_WHITE}*${SRC_NS_PLAIN_CHAR_FLOW_OUT})*`;
+var SRC_NB_NS_PLAIN_IN_LINE_FLOW_IN = `(?:${SRC_S_WHITE}*${SRC_NS_PLAIN_CHAR_FLOW_IN})*`;
+var SRC_NS_PLAIN_ONE_LINE_FLOW_OUT = `${SRC_NS_PLAIN_FIRST_FLOW_OUT}#*${SRC_NB_NS_PLAIN_IN_LINE_FLOW_OUT}`;
+var SRC_NS_PLAIN_ONE_LINE_FLOW_IN = `${SRC_NS_PLAIN_FIRST_FLOW_IN}#*${SRC_NB_NS_PLAIN_IN_LINE_FLOW_IN}`;
+var SRC_NS_PLAIN_ONE_LINE_BLOCK_KEY = SRC_NS_PLAIN_ONE_LINE_FLOW_OUT;
+var SRC_NS_PLAIN_ONE_LINE_FLOW_KEY = SRC_NS_PLAIN_ONE_LINE_FLOW_IN;
+var SRC_S_NS_PLAIN_NEXT_LINE_FLOW_OUT = `\\n+${SRC_NS_PLAIN_CHAR_FLOW_OUT}${SRC_NB_NS_PLAIN_IN_LINE_FLOW_OUT}`;
+var SRC_S_NS_PLAIN_NEXT_LINE_FLOW_IN = `\\n+${SRC_NS_PLAIN_CHAR_FLOW_IN}${SRC_NB_NS_PLAIN_IN_LINE_FLOW_IN}`;
+var SRC_NS_PLAIN_MULTI_LINE_FLOW_OUT = `${SRC_NS_PLAIN_ONE_LINE_FLOW_OUT}(?:${SRC_S_NS_PLAIN_NEXT_LINE_FLOW_OUT})*`;
+var SRC_NS_PLAIN_MULTI_LINE_FLOW_IN = `${SRC_NS_PLAIN_ONE_LINE_FLOW_IN}(?:${SRC_S_NS_PLAIN_NEXT_LINE_FLOW_IN})*`;
+var NS_PLAIN_FLOW_OUT = new RegExp(`^(?:${SRC_NS_PLAIN_MULTI_LINE_FLOW_OUT})$`, "u");
+var NS_PLAIN_FLOW_IN = new RegExp(`^(?:${SRC_NS_PLAIN_MULTI_LINE_FLOW_IN})$`, "u");
+var NS_PLAIN_BLOCK_KEY = new RegExp(`^(?:${SRC_NS_PLAIN_ONE_LINE_BLOCK_KEY})$`, "u");
+var NS_PLAIN_FLOW_KEY = new RegExp(`^(?:${SRC_NS_PLAIN_ONE_LINE_FLOW_KEY})$`, "u");
+var NB_SINGLE_ONE_LINE = new RegExp(`^(?:${SRC_NB_JSON})*$`, "u");
+var NB_SINGLE_MULTI_LINE = new RegExp(`^(?:${SRC_NB_JSON}|\\n)*$`, "u");
+var BLOCK_SCALAR_CONTENT = new RegExp(`^(?:${SRC_NB_CHAR}|\\n)*$`, "u");
+var C_FORBIDDEN_FIRST_LINE = /^(?:---|\.\.\.)(?=$|[ \t\n\r])/;
+var C_FORBIDDEN_CONTENT = /^(?:---|\.\.\.)(?=$|[ \t\n\r])/m;
+function canUsePlain(layout) {
+	const str = layout.node.value;
+	if (str !== "") {
+		if (!(layout.isKey ? layout.flowOnly ? NS_PLAIN_FLOW_KEY : NS_PLAIN_BLOCK_KEY : layout.flowOnly ? NS_PLAIN_FLOW_IN : NS_PLAIN_FLOW_OUT).test(str)) return false;
+		if (layout.shiftOfFirstLine === 0 && C_FORBIDDEN_FIRST_LINE.test(str)) return false;
+		if (layout.shiftOfContent === 0) {
+			const firstLineBreak = str.indexOf("\n");
+			if (firstLineBreak !== -1) {
+				const content = str.slice(firstLineBreak + 1);
+				if (C_FORBIDDEN_CONTENT.test(content)) return false;
+			}
+		}
+	}
+	const resolvedTag = layout.presenterOptions.schema.resolveImplicitScalarTag(str).tag.tagName;
+	if (!layout.node.tagged && resolvedTag !== layout.node.tag) return false;
+	if (!layout.node.tagged && str === "=" && resolvedTag === layout.presenterOptions.schema.defaultScalarTag.tagName) return false;
+	return true;
+}
+function canUseSingleQuoted(layout) {
+	const str = layout.node.value;
+	if (!(layout.isKey ? NB_SINGLE_ONE_LINE : NB_SINGLE_MULTI_LINE).test(str)) return false;
+	if (/[ \t]\n|\n[ \t]/.test(str)) return false;
+	if (!layout.isKey && layout.shiftOfContent === 0) {
+		const firstLineBreak = str.indexOf("\n");
+		if (firstLineBreak !== -1 && C_FORBIDDEN_CONTENT.test(str.slice(firstLineBreak + 1))) return false;
+	}
+	return true;
+}
+function canUseBlock(layout) {
+	if (layout.flowOnly || !BLOCK_SCALAR_CONTENT.test(layout.node.value)) return false;
+	const contentIndent = layout.shiftOfContent - layout.shiftOfParent;
+	if (contentIndent < 1) return false;
+	if (contentIndent > 9 && /^\n* /.test(layout.node.value)) return false;
+	if (layout.shiftOfContent === 0 && C_FORBIDDEN_CONTENT.test(layout.node.value)) return false;
+	return true;
+}
+function detectAllowedStyles(layout) {
+	let mask = setBit(0, SCALAR_STYLE.DOUBLE_QUOTED);
+	if (canUsePlain(layout)) mask = setBit(mask, SCALAR_STYLE.PLAIN);
+	if (canUseSingleQuoted(layout)) mask = setBit(mask, SCALAR_STYLE.SINGLE_QUOTED);
+	if (canUseBlock(layout)) mask = setBit(setBit(mask, SCALAR_STYLE.LITERAL_BLOCK), SCALAR_STYLE.FOLDED_BLOCK);
+	layout.allowedStylesMask = mask;
+}
+function renderScalar(layout) {
+	switch (layout.style) {
+		case SCALAR_STYLE.PLAIN: return renderPlain(layout);
+		case SCALAR_STYLE.SINGLE_QUOTED: return renderSingleQuoted(layout);
+		case SCALAR_STYLE.LITERAL_BLOCK: return renderLiteralBlock(layout);
+		case SCALAR_STYLE.FOLDED_BLOCK: return renderFoldedBlock(layout);
+		case SCALAR_STYLE.DOUBLE_QUOTED: return renderDoubleQuoted(layout);
+	}
+}
+function renderPlain(layout) {
+	return encodeFlowBreaks(layout.node.value, layout.shiftOfContent);
+}
+function renderSingleQuoted(layout) {
+	return `'${encodeFlowBreaks(layout.node.value, layout.shiftOfContent).replace(/'/g, "''")}'`;
+}
+function renderLiteralBlock(layout) {
+	const value = layout.node.value;
+	return "|" + blockHeader(value, layout.shiftOfParent, layout.shiftOfContent) + dropEndingNewline(indentString(value, layout.shiftOfContent));
+}
+function renderFoldedBlock(layout) {
+	const value = layout.node.value;
+	const w = layout.presenterOptions.lineWidth;
+	let availableWidth = Infinity;
+	if (w !== -1) availableWidth = Math.max(Math.min(w, 40), w - layout.shiftOfContent);
+	return ">" + blockHeader(value, layout.shiftOfParent, layout.shiftOfContent) + dropEndingNewline(indentString(foldBlockScalar(value, availableWidth), layout.shiftOfContent));
+}
+function renderDoubleQuoted(layout) {
+	return `"${escapeString(layout.node.value)}"`;
+}
+function encodeFlowBreaks(string, shiftOfContent) {
+	let nextLF = string.indexOf("\n");
+	if (nextLF === -1) return string;
+	const pad = " ".repeat(shiftOfContent);
+	let result = string.slice(0, nextLF);
+	const lineRe = /(\n+)([^\n]*)/g;
+	lineRe.lastIndex = nextLF;
+	let match;
+	while (match = lineRe.exec(string)) {
+		const breaks = match[1].length;
+		const line = match[2];
+		result += "\n".repeat(breaks + 1) + pad + line;
+	}
+	return result;
+}
+function indentString(string, spaces) {
+	const indent = " ".repeat(spaces);
+	let position = 0;
+	let result = "";
+	const length = string.length;
+	while (position < length) {
+		let line;
+		const next = string.indexOf("\n", position);
+		if (next === -1) {
+			line = string.slice(position);
+			position = length;
+		} else {
+			line = string.slice(position, next + 1);
+			position = next + 1;
+		}
+		if (line.length && line !== "\n") result += indent;
+		result += line;
+	}
+	return result;
+}
+function needIndentIndicator(string) {
+	return /^\n* /.test(string);
+}
+function blockHeader(string, shiftOfParent, shiftOfContent) {
+	const indentIndicator = needIndentIndicator(string) ? String(shiftOfContent - shiftOfParent) : "";
+	const clip = string[string.length - 1] === "\n";
+	return `${indentIndicator}${clip && (string[string.length - 2] === "\n" || string === "\n") ? "+" : clip ? "" : "-"}\n`;
+}
+function dropEndingNewline(string) {
+	return string[string.length - 1] === "\n" ? string.slice(0, -1) : string;
+}
+function isMoreIndented(char) {
+	return char === " " || char === "	";
+}
+function foldLine(line, width) {
+	if (line === "" || isMoreIndented(line[0])) return line;
+	const breakRe = / [^ \t]/g;
+	let match;
+	let start = 0;
+	let end;
+	let curr = 0;
+	let next = 0;
+	let result = "";
+	while (match = breakRe.exec(line)) {
+		next = match.index;
+		if (next - start > width) {
+			end = curr > start ? curr : next;
+			result += `\n${line.slice(start, end)}`;
+			start = end + 1;
+		}
+		curr = next;
+	}
+	result += "\n";
+	if (line.length - start > width && curr > start) result += `${line.slice(start, curr)}\n${line.slice(curr + 1)}`;
+	else result += line.slice(start);
+	return result.slice(1);
+}
+function foldBlockScalar(string, width) {
+	const lineRe = /(\n+)([^\n]*)/g;
+	let nextLF = string.indexOf("\n");
+	if (nextLF === -1) nextLF = string.length;
+	lineRe.lastIndex = nextLF;
+	let result = foldLine(string.slice(0, nextLF), width);
+	let prevMoreIndented = string[0] === "\n" || isMoreIndented(string[0]);
+	let moreIndented;
+	let match;
+	while (match = lineRe.exec(string)) {
+		const prefix = match[1];
+		const line = match[2];
+		moreIndented = line !== "" && isMoreIndented(line[0]);
+		result += prefix + (!prevMoreIndented && !moreIndented && line !== "" ? "\n" : "") + foldLine(line, width);
+		prevMoreIndented = moreIndented;
+	}
+	return result;
+}
+var CHARACTERS_TO_ESCAPE = /["\\\x00-\x1F\x7F-\xA0\u2028\u2029\uD800-\uDFFF\uFEFF\uFFFE\uFFFF]/gu;
+function escapeCharacter(character) {
+	switch (character) {
+		case "\0": return "\\0";
+		case "\x07": return "\\a";
+		case "\b": return "\\b";
+		case "	": return "\\t";
+		case "\n": return "\\n";
+		case "\v": return "\\v";
+		case "\f": return "\\f";
+		case "\r": return "\\r";
+		case "\x1B": return "\\e";
+		case "\"": return "\\\"";
+		case "\\": return "\\\\";
+		case "": return "\\N";
+		case "\xA0": return "\\_";
+		case "\u2028": return "\\L";
+		case "\u2029": return "\\P";
+	}
+	const code = character.charCodeAt(0);
+	const hex = code.toString(16).toUpperCase();
+	if (code <= 255) return `\\x${"0".repeat(2 - hex.length)}${hex}`;
+	return `\\u${"0".repeat(4 - hex.length)}${hex}`;
+}
+function escapeString(string) {
+	return string.replace(CHARACTERS_TO_ESCAPE, escapeCharacter);
+}
+//#endregion
+//#region src/ast/presenter.ts
+var CHAR_LINE_FEED = 10;
+var DEFAULT_PRESENTER_OPTIONS = {
+	indent: 2,
+	seqNoIndent: false,
+	seqInlineFirst: true,
+	lineWidth: 80,
+	flowBracketPadding: false,
+	flowSkipCommaSpace: false,
+	flowSkipColonSpace: false,
+	quoteFlowKeys: false,
+	quoteStyle: "single",
+	forceQuotes: false,
+	scalarStyleRules: Object.keys(DEFAULT_SCALAR_STYLE_RULES).map((name) => Reflect.get(DEFAULT_SCALAR_STYLE_RULES, name)),
+	tagBeforeAnchor: false
 };
-
-TunnelingAgent.prototype.createSocket = function createSocket(options, cb) {
-  var self = this;
-  var placeholder = {};
-  self.sockets.push(placeholder);
-
-  var connectOptions = mergeOptions({}, self.proxyOptions, {
-    method: 'CONNECT',
-    path: options.host + ':' + options.port,
-    agent: false,
-    headers: {
-      host: options.host + ':' + options.port
-    }
-  });
-  if (options.localAddress) {
-    connectOptions.localAddress = options.localAddress;
-  }
-  if (connectOptions.proxyAuth) {
-    connectOptions.headers = connectOptions.headers || {};
-    connectOptions.headers['Proxy-Authorization'] = 'Basic ' +
-        new Buffer(connectOptions.proxyAuth).toString('base64');
-  }
-
-  debug('making CONNECT request');
-  var connectReq = self.request(connectOptions);
-  connectReq.useChunkedEncodingByDefault = false; // for v0.6
-  connectReq.once('response', onResponse); // for v0.6
-  connectReq.once('upgrade', onUpgrade);   // for v0.6
-  connectReq.once('connect', onConnect);   // for v0.7 or later
-  connectReq.once('error', onError);
-  connectReq.end();
-
-  function onResponse(res) {
-    // Very hacky. This is necessary to avoid http-parser leaks.
-    res.upgrade = true;
-  }
-
-  function onUpgrade(res, socket, head) {
-    // Hacky.
-    process.nextTick(function() {
-      onConnect(res, socket, head);
-    });
-  }
-
-  function onConnect(res, socket, head) {
-    connectReq.removeAllListeners();
-    socket.removeAllListeners();
-
-    if (res.statusCode !== 200) {
-      debug('tunneling socket could not be established, statusCode=%d',
-        res.statusCode);
-      socket.destroy();
-      var error = new Error('tunneling socket could not be established, ' +
-        'statusCode=' + res.statusCode);
-      error.code = 'ECONNRESET';
-      options.request.emit('error', error);
-      self.removeSocket(placeholder);
-      return;
-    }
-    if (head.length > 0) {
-      debug('got illegal response body from proxy');
-      socket.destroy();
-      var error = new Error('got illegal response body from proxy');
-      error.code = 'ECONNRESET';
-      options.request.emit('error', error);
-      self.removeSocket(placeholder);
-      return;
-    }
-    debug('tunneling connection has established');
-    self.sockets[self.sockets.indexOf(placeholder)] = socket;
-    return cb(socket);
-  }
-
-  function onError(cause) {
-    connectReq.removeAllListeners();
-
-    debug('tunneling socket could not be established, cause=%s\n',
-          cause.message, cause.stack);
-    var error = new Error('tunneling socket could not be established, ' +
-                          'cause=' + cause.message);
-    error.code = 'ECONNRESET';
-    options.request.emit('error', error);
-    self.removeSocket(placeholder);
-  }
-};
-
-TunnelingAgent.prototype.removeSocket = function removeSocket(socket) {
-  var pos = this.sockets.indexOf(socket)
-  if (pos === -1) {
-    return;
-  }
-  this.sockets.splice(pos, 1);
-
-  var pending = this.requests.shift();
-  if (pending) {
-    // If we have pending requests and a socket gets closed a new one
-    // needs to be created to take over in the pool for the one that closed.
-    this.createSocket(pending, function(socket) {
-      pending.request.onSocket(socket);
-    });
-  }
-};
-
-function createSecureSocket(options, cb) {
-  var self = this;
-  TunnelingAgent.prototype.createSocket.call(self, options, function(socket) {
-    var hostHeader = options.request.getHeader('host');
-    var tlsOptions = mergeOptions({}, self.options, {
-      socket: socket,
-      servername: hostHeader ? hostHeader.replace(/:.*$/, '') : options.host
-    });
-
-    // 0 is dummy port for v0.6
-    var secureSocket = tls.connect(0, tlsOptions);
-    self.sockets[self.sockets.indexOf(socket)] = secureSocket;
-    cb(secureSocket);
-  });
+function nodeTagShort(node) {
+	return node.tagged ? node.tag : tagNameShort(node.tag);
 }
-
-
-function toOptions(host, port, localAddress) {
-  if (typeof host === 'string') { // since v0.10
-    return {
-      host: host,
-      port: port,
-      localAddress: localAddress
-    };
-  }
-  return host; // for v0.11 or later
+function createPresenterState(options) {
+	const opts = _objectSpread2(_objectSpread2({}, DEFAULT_PRESENTER_OPTIONS), options);
+	if (opts.flowSkipColonSpace) opts.quoteFlowKeys = true;
+	return _objectSpread2(_objectSpread2({}, opts), {}, {
+		defaultScalarTagName: opts.schema.defaultScalarTag.tagName,
+		openEnded: false
+	});
 }
-
-function mergeOptions(target) {
-  for (var i = 1, len = arguments.length; i < len; ++i) {
-    var overrides = arguments[i];
-    if (typeof overrides === 'object') {
-      var keys = Object.keys(overrides);
-      for (var j = 0, keyLen = keys.length; j < keyLen; ++j) {
-        var k = keys[j];
-        if (overrides[k] !== undefined) {
-          target[k] = overrides[k];
-        }
-      }
-    }
-  }
-  return target;
+function generateNextLine(state, level) {
+	return `\n${" ".repeat(state.indent * level)}`;
 }
-
-
-var debug;
-if (process.env.NODE_DEBUG && /\btunnel\b/.test(process.env.NODE_DEBUG)) {
-  debug = function() {
-    var args = Array.prototype.slice.call(arguments);
-    if (typeof args[0] === 'string') {
-      args[0] = 'TUNNEL: ' + args[0];
-    } else {
-      args.unshift('TUNNEL:');
-    }
-    console.error.apply(console, args);
-  }
-} else {
-  debug = function() {};
+function scalarLayout(state, node, parent, level, isKey, flowOnly) {
+	return {
+		node,
+		parent,
+		level,
+		isKey,
+		flowOnly,
+		shiftOfParent: level === 0 ? -1 : state.indent * (level - 1),
+		shiftOfContent: state.indent * Math.max(1, level),
+		shiftOfFirstLine: level === 0 ? 0 : state.indent * level,
+		presenterOptions: state,
+		allowedStylesMask: 0,
+		style: node.style
+	};
 }
-exports.debug = debug; // for test
-
-
-/***/ }),
-
-/***/ 5030:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-
-function getUserAgent() {
-  if (typeof navigator === "object" && "userAgent" in navigator) {
-    return navigator.userAgent;
-  }
-
-  if (typeof process === "object" && "version" in process) {
-    return `Node.js/${process.version.substr(1)} (${process.platform}; ${process.arch})`;
-  }
-
-  return "<environment undetectable>";
+function writeFlowSequence(state, level, node) {
+	let result = "";
+	for (let index = 0, length = node.items.length; index < length; index += 1) {
+		const item = writeNode(state, level, node.items[index], node, {}).text;
+		if (index > 0) result += `,${!state.flowSkipCommaSpace ? " " : ""}`;
+		result += item;
+	}
+	const pad = state.flowBracketPadding && node.items.length > 0 ? " " : "";
+	return `[${pad}${result}${pad}]`;
 }
-
-exports.getUserAgent = getUserAgent;
-//# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 2940:
-/***/ ((module) => {
-
-// Returns a wrapper function that returns a wrapped callback
-// The wrapper function should do some stuff, and return a
-// presumably different callback function.
-// This makes sure that own properties are retained, so that
-// decorations and such are not lost along the way.
-module.exports = wrappy
-function wrappy (fn, cb) {
-  if (fn && cb) return wrappy(fn)(cb)
-
-  if (typeof fn !== 'function')
-    throw new TypeError('need wrapper function')
-
-  Object.keys(fn).forEach(function (k) {
-    wrapper[k] = fn[k]
-  })
-
-  return wrapper
-
-  function wrapper() {
-    var args = new Array(arguments.length)
-    for (var i = 0; i < args.length; i++) {
-      args[i] = arguments[i]
-    }
-    var ret = fn.apply(this, args)
-    var cb = args[args.length-1]
-    if (typeof ret === 'function' && ret !== cb) {
-      Object.keys(cb).forEach(function (k) {
-        ret[k] = cb[k]
-      })
-    }
-    return ret
-  }
+function writeBlockSequence(state, level, node, compact) {
+	let result = "";
+	for (let index = 0, length = node.items.length; index < length; index += 1) {
+		const item = writeNode(state, level + 1, node.items[index], node, {
+			block: true,
+			compact: state.seqInlineFirst,
+			isblockseq: true
+		}).text;
+		if (!compact || result !== "") result += generateNextLine(state, level);
+		if (item === "" || CHAR_LINE_FEED === item.charCodeAt(0)) result += "-";
+		else result += "- ";
+		result += item;
+	}
+	return result;
 }
+function writeFlowMapping(state, level, node) {
+	let result = "";
+	for (const { key, value } of node.items) {
+		let pairBuffer = "";
+		if (result !== "") pairBuffer += `,${!state.flowSkipCommaSpace ? " " : ""}`;
+		const keyRender = writeNode(state, level, key, node, { iskey: true });
+		const keyText = keyRender.text;
+		const valueText = writeNode(state, level, value, node, {}).text;
+		const sep = state.flowSkipColonSpace || valueText === "" ? "" : " ";
+		const keyIsBareProps = key.kind === "scalar" && keyRender.noBody && (key.tagged || key.anchor !== void 0);
+		const keyColonSep = key.kind === "alias" || keyIsBareProps ? " " : "";
+		pairBuffer += `${keyText}${keyColonSep}:${sep}${valueText}`;
+		result += pairBuffer;
+	}
+	const pad = state.flowBracketPadding && result !== "" ? " " : "";
+	return `{${pad}${result}${pad}}`;
+}
+function writeBlockMapping(state, level, node, compact) {
+	let result = "";
+	for (let index = 0, length = node.items.length; index < length; index += 1) {
+		let pairBuffer = "";
+		if (!compact || result !== "") pairBuffer += generateNextLine(state, level);
+		const { key, value } = node.items[index];
+		const keyIsBlock = (key.kind === "mapping" || key.kind === "sequence") && key.style === COLLECTION_STYLE.BLOCK && key.items.length !== 0 || key.kind === "scalar" && (key.style === SCALAR_STYLE.LITERAL_BLOCK || key.style === SCALAR_STYLE.FOLDED_BLOCK);
+		const keyRender = keyIsBlock ? writeNode(state, level + 1, key, node, {
+			block: true,
+			compact: true,
+			isblockseq: !cannotBeCompact(state, key, level + 1)
+		}) : writeNode(state, level + 1, key, node, {
+			block: true,
+			compact: true,
+			iskey: true
+		});
+		const keyText = keyRender.text;
+		const keyHasLineBreak = key.kind === "scalar" && key.value.indexOf("\n") !== -1;
+		const keyIsTooLong = keyText.length > 1024 && /^[\s\S]{1025}/u.test(keyText);
+		const explicitPair = keyIsBlock || keyHasLineBreak || keyIsTooLong;
+		if (explicitPair) if (keyText && CHAR_LINE_FEED === keyText.charCodeAt(0)) pairBuffer += "?";
+		else pairBuffer += "? ";
+		pairBuffer += keyText;
+		if (explicitPair) pairBuffer += generateNextLine(state, level);
+		const valueText = writeNode(state, level + 1, value, node, {
+			block: true,
+			compact: explicitPair,
+			isblockseq: explicitPair && !cannotBeCompact(state, value, level + 1)
+		}).text;
+		const keyIsBareProps = key.kind === "scalar" && keyRender.noBody && (key.tagged || key.anchor !== void 0);
+		const keyColonSep = !explicitPair && (key.kind === "alias" || keyIsBareProps) ? " " : "";
+		if (valueText === "" || CHAR_LINE_FEED === valueText.charCodeAt(0)) pairBuffer += `${keyColonSep}:`;
+		else pairBuffer += `${keyColonSep}: `;
+		pairBuffer += valueText;
+		result += pairBuffer;
+	}
+	return result;
+}
+function cannotBeCompact(state, node, level) {
+	if (node.kind === "alias") return true;
+	return node.tagged || node.anchor !== void 0 || state.indent < 2 && level > 0;
+}
+function writeNode(state, level, node, parent, ctx) {
+	var _ctx$compact;
+	if (node.kind === "alias") {
+		state.openEnded = false;
+		return {
+			text: `*${node.anchor}`,
+			noBody: false
+		};
+	}
+	const { block = false, iskey = false, isblockseq = false } = ctx;
+	let compact = (_ctx$compact = ctx.compact) !== null && _ctx$compact !== void 0 ? _ctx$compact : false;
+	const hasAnchor = node.anchor !== void 0;
+	if (cannotBeCompact(state, node, level)) compact = false;
+	let body;
+	let shouldPrintTag = node.tagged;
+	const useBlockCollection = block && (node.kind === "mapping" || node.kind === "sequence") && node.style === COLLECTION_STYLE.BLOCK && node.items.length !== 0;
+	if (node.kind === "mapping") if (useBlockCollection) body = writeBlockMapping(state, level, node, compact);
+	else body = writeFlowMapping(state, level, node);
+	else if (node.kind === "sequence") if (useBlockCollection) if (state.seqNoIndent && !isblockseq && level > 0) body = writeBlockSequence(state, level - 1, node, compact);
+	else body = writeBlockSequence(state, level, node, compact);
+	else body = writeFlowSequence(state, level, node);
+	else {
+		const layout = scalarLayout(state, node, parent, level, iskey, !block);
+		detectAllowedStyles(layout);
+		for (const rule of state.scalarStyleRules) rule(layout);
+		body = renderScalar(layout);
+		state.openEnded = (layout.style === SCALAR_STYLE.LITERAL_BLOCK || layout.style === SCALAR_STYLE.FOLDED_BLOCK) && (node.value === "\n" || node.value.endsWith("\n\n"));
+		shouldPrintTag = node.tagged || body === "" && layout.flowOnly && (parent === null || parent === void 0 ? void 0 : parent.kind) === "sequence" && !hasAnchor || layout.style !== SCALAR_STYLE.PLAIN && node.tag !== state.defaultScalarTagName;
+	}
+	if ((node.kind === "mapping" || node.kind === "sequence") && !useBlockCollection) state.openEnded = false;
+	if (useBlockCollection && compact && level > 0 && state.indent > 2) body = `${" ".repeat(state.indent - 2)}${body}`;
+	const noBody = body === "";
+	let text = body;
+	if (shouldPrintTag || hasAnchor) {
+		const props = [];
+		const tag = shouldPrintTag ? nodeTagShort(node) : null;
+		const anchor = hasAnchor ? `&${node.anchor}` : null;
+		if (state.tagBeforeAnchor) {
+			if (tag !== null) props.push(tag);
+			if (anchor !== null) props.push(anchor);
+		} else {
+			if (anchor !== null) props.push(anchor);
+			if (tag !== null) props.push(tag);
+		}
+		const sep = body === "" || body.charCodeAt(0) === CHAR_LINE_FEED ? "" : " ";
+		text = `${props.join(" ")}${sep}${body}`;
+	}
+	return {
+		text,
+		noBody
+	};
+}
+function rootStartsOwnLine(node) {
+	return (node.kind === "sequence" || node.kind === "mapping") && node.style === COLLECTION_STYLE.BLOCK && node.items.length !== 0 && !node.tagged && node.anchor === void 0;
+}
+function writeDocumentDirectives(doc) {
+	let result = "";
+	for (const directive of doc.directives) {
+		if (directive.kind === "yaml") {
+			result += `%YAML ${directive.version}\n`;
+			continue;
+		}
+		const { handle, prefix } = directive;
+		result += `%TAG ${handle} ${prefix}\n`;
+	}
+	return result;
+}
+/**
+* Build YAML from AST.
+*
+* @category AST
+*/
+function present(documents, options) {
+	const state = createPresenterState(options);
+	let result = "";
+	let previousEnded = false;
+	for (let index = 0; index < documents.length; index += 1) {
+		const doc = documents[index];
+		state.openEnded = false;
+		const directives = writeDocumentDirectives(doc);
+		const hasDirectives = directives !== "";
+		const marker = doc.explicitStart || hasDirectives || index > 0 && !previousEnded;
+		result += directives;
+		if (doc.contents === null) {
+			if (marker) result += "---\n";
+		} else if (marker) {
+			const body = writeNode(state, 0, doc.contents, null, {
+				block: true,
+				compact: true
+			}).text;
+			const sep = body === "" ? "" : hasDirectives || rootStartsOwnLine(doc.contents) ? "\n" : " ";
+			result += `---${sep}${body}\n`;
+		} else result += writeNode(state, 0, doc.contents, null, {
+			block: true,
+			compact: true
+		}).text + "\n";
+		previousEnded = doc.explicitEnd || state.openEnded;
+		if (previousEnded) result += "...\n";
+	}
+	return result;
+}
+//#endregion
+//#region src/dump.ts
+var DEFAULT_DUMP_OPTIONS = _objectSpread2(_objectSpread2({}, DEFAULT_PRESENTER_OPTIONS), {}, {
+	schema: DUMP_SCHEMA,
+	skipInvalid: false,
+	noRefs: false,
+	flowLevel: -1,
+	sortKeys: false,
+	transform: () => {}
+});
+function defaultCompareFn(a, b) {
+	const x = String(a);
+	const y = String(b);
+	if (x < y) return -1;
+	if (x > y) return 1;
+	return 0;
+}
+/**
+* Serializes JS object as a YAML document. By default it can dump every
+* supported YAML type, so it throws an exception if you try to dump regexps or
+* functions. However, you can disable exceptions by setting the
+* {@link DumpOptions.skipInvalid} option to `true`.
+*
+* @category Main
+*/
+function dump(input, options = {}) {
+	const opts = _objectSpread2(_objectSpread2({}, DEFAULT_DUMP_OPTIONS), options);
+	const documents = jsToAst(input, opts.schema, {
+		noRefs: opts.noRefs,
+		skipInvalid: opts.skipInvalid
+	});
+	if (opts.flowLevel >= 0) visit(documents, (node, ctx) => {
+		if (ctx.depth < opts.flowLevel) return;
+		if (node.kind === "sequence" || node.kind === "mapping") node.style = COLLECTION_STYLE.FLOW;
+		return VISIT_SKIP;
+	});
+	if (opts.sortKeys) {
+		const compareFn = opts.sortKeys === true ? defaultCompareFn : opts.sortKeys;
+		visit(documents, (node) => {
+			if (node.kind !== "mapping") return;
+			node.items.sort((a, b) => compareFn(a.key.kind === "scalar" ? a.key.value : "", b.key.kind === "scalar" ? b.key.value : ""));
+		});
+	}
+	opts.transform(documents);
+	return present(documents, _objectSpread2(_objectSpread2({}, pick(opts, Object.keys(DEFAULT_PRESENTER_OPTIONS))), {}, { schema: opts.schema }));
+}
+//#endregion
+//#region src/ast/from_events.ts
+var NO_RANGE = -1;
+function eventPosition(event) {
+	if ("tagStart" in event && event.tagStart !== NO_RANGE) return event.tagStart;
+	if ("anchorStart" in event && event.anchorStart !== NO_RANGE) return event.anchorStart;
+	if ("valueStart" in event && event.valueStart !== NO_RANGE) return event.valueStart;
+	if ("start" in event) return event.start;
+	return 0;
+}
+function rawTag(state, event) {
+	return event.tagStart === NO_RANGE ? "" : state.source.slice(event.tagStart, event.tagEnd);
+}
+function anchorName(state, event) {
+	return event.anchorStart === NO_RANGE ? void 0 : state.source.slice(event.anchorStart, event.anchorEnd);
+}
+function buildScalar(state, event) {
+	const value = getScalarValue(state.source, event);
+	const raw = rawTag(state, event);
+	let tag;
+	let tagged = false;
+	if (raw !== "") {
+		tagged = true;
+		tag = raw;
+	} else if (event.style === SCALAR_STYLE.PLAIN) tag = state.schema.resolveImplicitScalarTag(value).tag.tagName;
+	else tag = state.schema.defaultScalarTag.tagName;
+	return {
+		kind: "scalar",
+		tag,
+		tagged,
+		style: event.style,
+		anchor: anchorName(state, event),
+		value
+	};
+}
+function buildCollection(state, event, defaultTagName) {
+	const raw = rawTag(state, event);
+	let tag;
+	let tagged = false;
+	if (raw === "") tag = defaultTagName;
+	else {
+		tag = raw;
+		tagged = true;
+	}
+	return {
+		tag,
+		tagged,
+		style: event.style,
+		anchor: anchorName(state, event)
+	};
+}
+function addNode(state, node) {
+	const frame = state.frames[state.frames.length - 1];
+	if (frame.kind === "document") frame.doc.contents = node;
+	else if (frame.kind === "sequence") frame.node.items.push(node);
+	else if (frame.key) {
+		frame.node.items.push({
+			key: frame.key,
+			value: node
+		});
+		frame.key = null;
+	} else frame.key = node;
+}
+/**
+* Builds an AST from parser events
+*
+* @category AST
+*/
+function eventsToAst(events, options) {
+	const state = {
+		source: options.source,
+		schema: options.schema,
+		eventIndex: 0,
+		position: 0,
+		frames: [],
+		documents: []
+	};
+	while (state.eventIndex < events.length) {
+		const event = events[state.eventIndex++];
+		state.position = eventPosition(event);
+		switch (event.type) {
+			case EVENT_ID.DOCUMENT: {
+				const doc = {
+					contents: null,
+					explicitStart: event.explicitStart,
+					explicitEnd: event.explicitEnd,
+					directives: event.directives
+				};
+				state.frames.push({
+					kind: "document",
+					doc
+				});
+				break;
+			}
+			case EVENT_ID.SCALAR:
+				addNode(state, buildScalar(state, event));
+				break;
+			case EVENT_ID.SEQUENCE: {
+				const { tag, tagged, style, anchor } = buildCollection(state, event, "tag:yaml.org,2002:seq");
+				const node = {
+					kind: "sequence",
+					tag,
+					tagged,
+					style,
+					anchor,
+					items: []
+				};
+				state.frames.push({
+					kind: "sequence",
+					node
+				});
+				break;
+			}
+			case EVENT_ID.MAPPING: {
+				const { tag, tagged, style, anchor } = buildCollection(state, event, "tag:yaml.org,2002:map");
+				const node = {
+					kind: "mapping",
+					tag,
+					tagged,
+					style,
+					anchor,
+					items: []
+				};
+				state.frames.push({
+					kind: "mapping",
+					node,
+					key: null
+				});
+				break;
+			}
+			case EVENT_ID.ALIAS:
+				addNode(state, {
+					kind: "alias",
+					anchor: state.source.slice(event.anchorStart, event.anchorEnd)
+				});
+				break;
+			case EVENT_ID.POP: {
+				const frame = state.frames.pop();
+				if (frame.kind === "mapping" && frame.key) throw new Error("incomplete mapping pair in event stream");
+				if (frame.kind === "document") state.documents.push(frame.doc);
+				else addNode(state, frame.node);
+				break;
+			}
+		}
+	}
+	return state.documents;
+}
+//#endregion
+//#region src/index.ts
+/** @deprecated Use `EVENT_ID.DOCUMENT` instead. @internal */
+var EVENT_DOCUMENT = EVENT_ID.DOCUMENT;
+/** @deprecated Use `EVENT_ID.SEQUENCE` instead. @internal */
+var EVENT_SEQUENCE = EVENT_ID.SEQUENCE;
+/** @deprecated Use `EVENT_ID.MAPPING` instead. @internal */
+var EVENT_MAPPING = EVENT_ID.MAPPING;
+/** @deprecated Use `EVENT_ID.SCALAR` instead. @internal */
+var EVENT_SCALAR = EVENT_ID.SCALAR;
+/** @deprecated Use `EVENT_ID.ALIAS` instead. @internal */
+var EVENT_ALIAS = EVENT_ID.ALIAS;
+/** @deprecated Use `EVENT_ID.POP` instead. @internal */
+var EVENT_POP = EVENT_ID.POP;
+/** @deprecated Use `SCALAR_STYLE.PLAIN` instead. @internal */
+var SCALAR_STYLE_PLAIN = SCALAR_STYLE.PLAIN;
+/** @deprecated Use `SCALAR_STYLE.SINGLE_QUOTED` instead. @internal */
+var SCALAR_STYLE_SINGLE_QUOTED = SCALAR_STYLE.SINGLE_QUOTED;
+/** @deprecated Use `SCALAR_STYLE.DOUBLE_QUOTED` instead. @internal */
+var SCALAR_STYLE_DOUBLE_QUOTED = SCALAR_STYLE.DOUBLE_QUOTED;
+/** @deprecated Use `SCALAR_STYLE.LITERAL_BLOCK` instead. @internal */
+var SCALAR_STYLE_LITERAL_BLOCK = SCALAR_STYLE.LITERAL_BLOCK;
+/** @deprecated Use `SCALAR_STYLE.FOLDED_BLOCK` instead. @internal */
+var SCALAR_STYLE_FOLDED_BLOCK = SCALAR_STYLE.FOLDED_BLOCK;
+/** @deprecated Use `COLLECTION_STYLE.BLOCK` instead. @internal */
+var COLLECTION_STYLE_BLOCK = COLLECTION_STYLE.BLOCK;
+/** @deprecated Use `COLLECTION_STYLE.FLOW` instead. @internal */
+var COLLECTION_STYLE_FLOW = COLLECTION_STYLE.FLOW;
+/** @deprecated Use `CHOMPING_MODE.CLIP` instead. @internal */
+var CHOMPING_CLIP = CHOMPING_MODE.CLIP;
+/** @deprecated Use `CHOMPING_MODE.STRIP` instead. @internal */
+var CHOMPING_STRIP = CHOMPING_MODE.STRIP;
+/** @deprecated Use `CHOMPING_MODE.KEEP` instead. @internal */
+var CHOMPING_KEEP = CHOMPING_MODE.KEEP;
+//#endregion
+exports.CHOMPING_CLIP = CHOMPING_CLIP;
+exports.CHOMPING_KEEP = CHOMPING_KEEP;
+exports.CHOMPING_MODE = CHOMPING_MODE;
+exports.CHOMPING_STRIP = CHOMPING_STRIP;
+exports.COLLECTION_STYLE = COLLECTION_STYLE;
+exports.COLLECTION_STYLE_BLOCK = COLLECTION_STYLE_BLOCK;
+exports.COLLECTION_STYLE_FLOW = COLLECTION_STYLE_FLOW;
+exports.CORE_SCHEMA = CORE_SCHEMA;
+exports.DEFAULT_SCALAR_STYLE_RULES = DEFAULT_SCALAR_STYLE_RULES;
+exports.DUMP_SCHEMA = DUMP_SCHEMA;
+exports.EVENT_ALIAS = EVENT_ALIAS;
+exports.EVENT_DOCUMENT = EVENT_DOCUMENT;
+exports.EVENT_ID = EVENT_ID;
+exports.EVENT_MAPPING = EVENT_MAPPING;
+exports.EVENT_POP = EVENT_POP;
+exports.EVENT_SCALAR = EVENT_SCALAR;
+exports.EVENT_SEQUENCE = EVENT_SEQUENCE;
+exports.FAILSAFE_SCHEMA = FAILSAFE_SCHEMA;
+exports.JSON_SCHEMA = JSON_SCHEMA;
+exports.NOT_RESOLVED = NOT_RESOLVED;
+exports.SCALAR_STYLE = SCALAR_STYLE;
+exports.SCALAR_STYLE_DOUBLE_QUOTED = SCALAR_STYLE_DOUBLE_QUOTED;
+exports.SCALAR_STYLE_FOLDED_BLOCK = SCALAR_STYLE_FOLDED_BLOCK;
+exports.SCALAR_STYLE_LITERAL_BLOCK = SCALAR_STYLE_LITERAL_BLOCK;
+exports.SCALAR_STYLE_PLAIN = SCALAR_STYLE_PLAIN;
+exports.SCALAR_STYLE_SINGLE_QUOTED = SCALAR_STYLE_SINGLE_QUOTED;
+exports.Schema = Schema;
+exports.VISIT_BREAK = VISIT_BREAK;
+exports.VISIT_SKIP = VISIT_SKIP;
+exports.YAML11_SCHEMA = YAML11_SCHEMA;
+exports.YAMLException = YAMLException;
+exports.binaryTag = binaryTag;
+exports.boolCoreTag = boolCoreTag;
+exports.boolJsonTag = boolJsonTag;
+exports.boolYaml11Tag = boolYaml11Tag;
+exports.constructFromEvents = constructFromEvents;
+exports.defineMappingTag = defineMappingTag;
+exports.defineScalarTag = defineScalarTag;
+exports.defineSequenceTag = defineSequenceTag;
+exports.dump = dump;
+exports.eventsToAst = eventsToAst;
+exports.floatCoreTag = floatCoreTag;
+exports.floatJsonTag = floatJsonTag;
+exports.floatYaml11Tag = floatYaml11Tag;
+exports.getScalarValue = getScalarValue;
+exports.intCoreTag = intCoreTag;
+exports.intJsonTag = intJsonTag;
+exports.intYaml11Tag = intYaml11Tag;
+exports.jsToAst = jsToAst;
+exports.legacyMapTag = legacyMapTag;
+exports.load = load;
+exports.loadAll = loadAll;
+exports.mapTag = mapTag;
+exports.mergeTag = mergeTag;
+exports.nullCoreTag = nullCoreTag;
+exports.nullJsonTag = nullJsonTag;
+exports.nullYaml11Tag = nullYaml11Tag;
+exports.omapTag = omapTag;
+exports.pairsTag = pairsTag;
+exports.parseEvents = parseEvents;
+exports.present = present;
+exports.realMapTag = realMapTag;
+exports.seqTag = seqTag;
+exports.setTag = setTag;
+exports.strTag = strTag;
+exports.timestampTag = timestampTag;
+exports.visit = visit;
 
+//# sourceMappingURL=js-yaml.cjs.js.map
 
 /***/ }),
 
-/***/ 2877:
-/***/ ((module) => {
-
-module.exports = eval("require")("encoding");
-
-
-/***/ }),
-
-/***/ 1487:
+/***/ 2613:
 /***/ ((module) => {
 
 "use strict";
-module.exports = JSON.parse("{\"name\":\"aigle\",\"version\":\"1.14.1\",\"description\":\"Aigle is an ideal Promise library, faster and more functional than other Promise libraries\",\"main\":\"lib/aigle\",\"typings\":\"aigle.d.ts\",\"browser\":\"aigle-es5.min.js\",\"homepage\":\"https://github.com/suguru03/aigle\",\"keywords\":[\"aigle\",\"promise\",\"async\"],\"author\":\"Suguru Motegi\",\"license\":\"MIT\",\"devDependencies\":{\"babili\":\"0.1.4\",\"benchmark\":\"^2.1.1\",\"bluebird\":\"^3.5.3\",\"browserify\":\"^16.2.3\",\"buble\":\"^0.19.6\",\"codecov\":\"^3.2.0\",\"docdash\":\"^1.0.0\",\"eslint\":\"^5.0.0\",\"fs-extra\":\"^8.0.0\",\"gulp\":\"^4.0.0\",\"gulp-bump\":\"^3.0.0\",\"gulp-git\":\"^2.8.1\",\"gulp-tag-version\":\"^1.3.0\",\"husky\":\"^2.0.0\",\"jsdoc\":\"^3.5.5\",\"lint-staged\":\"^8.0.5\",\"lodash\":\"^4.15.0\",\"minimist\":\"^1.2.0\",\"mocha\":\"^6.1.4\",\"mocha.parallel\":\"0.15.6\",\"neo-async\":\"^2.6.0\",\"npm-run-all\":\"^4.1.5\",\"nyc\":\"^14.0.0\",\"prettier\":\"^1.14.3\",\"require-dir\":\"^1.0.0\",\"semver\":\"^6.0.0\",\"setimmediate\":\"^1.0.5\",\"tslint\":\"^5.11.0\",\"typeg\":\"^0.1.3\",\"typescript\":\"^3.1.6\",\"uglify-js\":\"^3.5.14\"},\"dependencies\":{\"aigle-core\":\"^1.0.0\"},\"husky\":{\"hooks\":{\"pre-commit\":\"npm-run-all -p build:type lint-staged\"}},\"lint-staged\":{\"*.{js,ts}\":[\"prettier --write\",\"git add\"]},\"prettier\":{\"printWidth\":100,\"singleQuote\":true},\"_resolved\":\"https://registry.npmjs.org/aigle/-/aigle-1.14.1.tgz\",\"_integrity\":\"sha512-bCmQ65CEebspmpbWFs6ab3S27TNyVH1b5MledX8KoiGxUhsJmPUUGpaoSijhwawNnq5Lt8jbcq7Z7gUAD0nuTw==\",\"_from\":\"aigle@1.14.1\"}");
+module.exports = require("assert");
 
 /***/ }),
 
-/***/ 2357:
+/***/ 5317:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("assert");;
+module.exports = require("child_process");
 
 /***/ }),
 
-/***/ 8614:
+/***/ 6982:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("events");;
+module.exports = require("crypto");
 
 /***/ }),
 
-/***/ 5747:
+/***/ 4434:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("fs");;
+module.exports = require("events");
 
 /***/ }),
 
-/***/ 8605:
+/***/ 9896:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("http");;
+module.exports = require("fs");
 
 /***/ }),
 
-/***/ 7211:
+/***/ 8611:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("https");;
+module.exports = require("http");
 
 /***/ }),
 
-/***/ 1631:
+/***/ 5692:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("net");;
+module.exports = require("https");
 
 /***/ }),
 
-/***/ 2087:
+/***/ 9278:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("os");;
+module.exports = require("net");
 
 /***/ }),
 
-/***/ 5622:
+/***/ 4589:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("path");;
+module.exports = require("node:assert");
 
 /***/ }),
 
-/***/ 2413:
+/***/ 6698:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("stream");;
+module.exports = require("node:async_hooks");
 
 /***/ }),
 
-/***/ 4016:
+/***/ 4573:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("tls");;
+module.exports = require("node:buffer");
 
 /***/ }),
 
-/***/ 8835:
+/***/ 7540:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("url");;
+module.exports = require("node:console");
 
 /***/ }),
 
-/***/ 1669:
+/***/ 7598:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("util");;
+module.exports = require("node:crypto");
 
 /***/ }),
 
-/***/ 8761:
+/***/ 3053:
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("zlib");;
+module.exports = require("node:diagnostics_channel");
+
+/***/ }),
+
+/***/ 610:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:dns");
+
+/***/ }),
+
+/***/ 8474:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:events");
+
+/***/ }),
+
+/***/ 7067:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:http");
+
+/***/ }),
+
+/***/ 2467:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:http2");
+
+/***/ }),
+
+/***/ 7030:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:net");
+
+/***/ }),
+
+/***/ 643:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:perf_hooks");
+
+/***/ }),
+
+/***/ 1792:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:querystring");
+
+/***/ }),
+
+/***/ 7075:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:stream");
+
+/***/ }),
+
+/***/ 8500:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:timers/promises");
+
+/***/ }),
+
+/***/ 1692:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:tls");
+
+/***/ }),
+
+/***/ 3136:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:url");
+
+/***/ }),
+
+/***/ 7975:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:util");
+
+/***/ }),
+
+/***/ 3429:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:util/types");
+
+/***/ }),
+
+/***/ 5919:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:worker_threads");
+
+/***/ }),
+
+/***/ 8522:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:zlib");
+
+/***/ }),
+
+/***/ 857:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("os");
+
+/***/ }),
+
+/***/ 6928:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("path");
+
+/***/ }),
+
+/***/ 3193:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("string_decoder");
+
+/***/ }),
+
+/***/ 3557:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("timers");
+
+/***/ }),
+
+/***/ 4756:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("tls");
+
+/***/ }),
+
+/***/ 9023:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("util");
 
 /***/ })
 
@@ -22725,8 +4330,9 @@ module.exports = require("zlib");;
 /******/ 	// The require function
 /******/ 	function __nccwpck_require__(moduleId) {
 /******/ 		// Check if module is in cache
-/******/ 		if(__webpack_module_cache__[moduleId]) {
-/******/ 			return __webpack_module_cache__[moduleId].exports;
+/******/ 		var cachedModule = __webpack_module_cache__[moduleId];
+/******/ 		if (cachedModule !== undefined) {
+/******/ 			return cachedModule.exports;
 /******/ 		}
 /******/ 		// Create a new module (and put it into the cache)
 /******/ 		var module = __webpack_module_cache__[moduleId] = {
@@ -22748,13 +4354,196 @@ module.exports = require("zlib");;
 /******/ 		return module.exports;
 /******/ 	}
 /******/ 	
-/************************************************************************/
-/******/ 	/* webpack/runtime/compat */
+/******/ 	// expose the modules object (__webpack_modules__)
+/******/ 	__nccwpck_require__.m = __webpack_modules__;
 /******/ 	
-/******/ 	__nccwpck_require__.ab = __dirname + "/";/************************************************************************/
-/******/ 	// module exports must be returned from runtime so entry inlining is disabled
-/******/ 	// startup
-/******/ 	// Load entry module and return exports
-/******/ 	return __nccwpck_require__(2932);
+/************************************************************************/
+/******/ 	/* webpack/runtime/asset-relocator-loader */
+/******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
+/******/ 	
+/******/ 	/* webpack/runtime/create fake namespace object */
+/******/ 	(() => {
+/******/ 		var getProto = Object.getPrototypeOf ? (obj) => (Object.getPrototypeOf(obj)) : (obj) => (obj.__proto__);
+/******/ 		var leafPrototypes;
+/******/ 		// create a fake namespace object
+/******/ 		// mode & 1: value is a module id, require it
+/******/ 		// mode & 2: merge all properties of value into the ns
+/******/ 		// mode & 4: return value when already ns object
+/******/ 		// mode & 16: return value when it's Promise-like
+/******/ 		// mode & 8|1: behave like require
+/******/ 		__nccwpck_require__.t = function(value, mode) {
+/******/ 			if(mode & 1) value = this(value);
+/******/ 			if(mode & 8) return value;
+/******/ 			if(typeof value === 'object' && value) {
+/******/ 				if((mode & 4) && value.__esModule) return value;
+/******/ 				if((mode & 16) && typeof value.then === 'function') return value;
+/******/ 			}
+/******/ 			var ns = Object.create(null);
+/******/ 			__nccwpck_require__.r(ns);
+/******/ 			var def = {};
+/******/ 			leafPrototypes = leafPrototypes || [null, getProto({}), getProto([]), getProto(getProto)];
+/******/ 			for(var current = mode & 2 && value; typeof current == 'object' && !~leafPrototypes.indexOf(current); current = getProto(current)) {
+/******/ 				Object.getOwnPropertyNames(current).forEach((key) => (def[key] = () => (value[key])));
+/******/ 			}
+/******/ 			def['default'] = () => (value);
+/******/ 			__nccwpck_require__.d(ns, def);
+/******/ 			return ns;
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/define property getters */
+/******/ 	(() => {
+/******/ 		// define getter functions for harmony exports
+/******/ 		__nccwpck_require__.d = (exports, definition) => {
+/******/ 			for(var key in definition) {
+/******/ 				if(__nccwpck_require__.o(definition, key) && !__nccwpck_require__.o(exports, key)) {
+/******/ 					Object.defineProperty(exports, key, { enumerable: true, get: definition[key] });
+/******/ 				}
+/******/ 			}
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/ensure chunk */
+/******/ 	(() => {
+/******/ 		__nccwpck_require__.f = {};
+/******/ 		// This file contains only the entry chunk.
+/******/ 		// The chunk loading function for additional chunks
+/******/ 		__nccwpck_require__.e = (chunkId) => {
+/******/ 			return Promise.all(Object.keys(__nccwpck_require__.f).reduce((promises, key) => {
+/******/ 				__nccwpck_require__.f[key](chunkId, promises);
+/******/ 				return promises;
+/******/ 			}, []));
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/get javascript chunk filename */
+/******/ 	(() => {
+/******/ 		// This function allow to reference async chunks
+/******/ 		__nccwpck_require__.u = (chunkId) => {
+/******/ 			// return url for filenames based on template
+/******/ 			return "" + chunkId + ".index.js";
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/hasOwnProperty shorthand */
+/******/ 	(() => {
+/******/ 		__nccwpck_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop))
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/make namespace object */
+/******/ 	(() => {
+/******/ 		// define __esModule on exports
+/******/ 		__nccwpck_require__.r = (exports) => {
+/******/ 			if(typeof Symbol !== 'undefined' && Symbol.toStringTag) {
+/******/ 				Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+/******/ 			}
+/******/ 			Object.defineProperty(exports, '__esModule', { value: true });
+/******/ 		};
+/******/ 	})();
+/******/ 	
+/******/ 	/* webpack/runtime/require chunk loading */
+/******/ 	(() => {
+/******/ 		// no baseURI
+/******/ 		
+/******/ 		// object to store loaded chunks
+/******/ 		// "1" means "loaded", otherwise not loaded yet
+/******/ 		var installedChunks = {
+/******/ 			792: 1
+/******/ 		};
+/******/ 		
+/******/ 		// no on chunks loaded
+/******/ 		
+/******/ 		var installChunk = (chunk) => {
+/******/ 			var moreModules = chunk.modules, chunkIds = chunk.ids, runtime = chunk.runtime;
+/******/ 			for(var moduleId in moreModules) {
+/******/ 				if(__nccwpck_require__.o(moreModules, moduleId)) {
+/******/ 					__nccwpck_require__.m[moduleId] = moreModules[moduleId];
+/******/ 				}
+/******/ 			}
+/******/ 			if(runtime) runtime(__nccwpck_require__);
+/******/ 			for(var i = 0; i < chunkIds.length; i++)
+/******/ 				installedChunks[chunkIds[i]] = 1;
+/******/ 		
+/******/ 		};
+/******/ 		
+/******/ 		// require() chunk loading for javascript
+/******/ 		__nccwpck_require__.f.require = (chunkId, promises) => {
+/******/ 			// "1" is the signal for "already loaded"
+/******/ 			if(!installedChunks[chunkId]) {
+/******/ 				if(true) { // all chunks have JS
+/******/ 					installChunk(require("./" + __nccwpck_require__.u(chunkId)));
+/******/ 				} else installedChunks[chunkId] = 1;
+/******/ 			}
+/******/ 		};
+/******/ 		
+/******/ 		// no external install chunk
+/******/ 		
+/******/ 		// no HMR
+/******/ 		
+/******/ 		// no HMR manifest
+/******/ 	})();
+/******/ 	
+/************************************************************************/
+var __webpack_exports__ = {};
+// This entry need to be wrapped in an IIFE because it need to be in strict mode.
+(() => {
+"use strict";
+
+
+const nodeRepo = __nccwpck_require__(3191)
+
+async function run () {
+  const [github, core] = await Promise.all([Promise.all(/* import() */[__nccwpck_require__.e(119), __nccwpck_require__.e(413)]).then(__nccwpck_require__.bind(__nccwpck_require__, 2413)), Promise.all(/* import() */[__nccwpck_require__.e(119), __nccwpck_require__.e(421)]).then(__nccwpck_require__.bind(__nccwpck_require__, 6421))])
+  try {
+    const token = core.getInput('repo-token', { required: true })
+    const configPath = core.getInput('configuration-path', { required: true })
+    const pullRequest = github.context.payload.pull_request
+
+    if (!pullRequest) {
+      throw new Error('Could not resolve pull request number, is Action triggered by something else than a pull request?')
+    }
+
+    const client = github.getOctokit(token)
+    const { owner, repo } = github.context.repo
+    const prId = pullRequest.number
+    const baseBranch = pullRequest.base.ref
+    const configAsString = await fetchConfig(github, client, owner, repo, configPath)
+
+    await nodeRepo.resolveLabelsThenUpdatePr({
+      baseBranch,
+      client,
+      configAsString,
+      owner,
+      repo,
+      prId
+    })
+  } catch (error) {
+    core.error(error)
+    core.setFailed(error.message)
+  }
+}
+
+async function fetchConfig (
+  github,
+  client,
+  owner,
+  repo,
+  filepath
+) {
+  const response = await client.rest.repos.getContent({
+    owner,
+    repo,
+    path: filepath,
+    ref: github.context.payload.pull_request.base.repo.default_branch
+  })
+
+  return Buffer.from(response.data.content, response.data.encoding).toString()
+}
+
+run()
+
+})();
+
+module.exports = __webpack_exports__;
 /******/ })()
 ;
