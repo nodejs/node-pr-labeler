@@ -54,7 +54,7 @@ jobs:
 
       - name: Check if dist/ has changed after build
         id: changedTest
-        run: git diff --quiet HEAD -- dist/ || echo "::set-output name=hasChanged::true"
+        run: git diff --quiet HEAD -- dist/ || echo "hasChanged=true" >> "$GITHUB_OUTPUT"
 
       - name: Commit and update tag
         if: ${{ steps.changedTest.outputs.hasChanged == 'true' }}
