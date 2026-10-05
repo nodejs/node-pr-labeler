@@ -145,7 +145,7 @@ async function fetchExistingLabels (options) {
 async function fetchLabelPages (options) {
   // the github client API is somewhat misleading,
   // this fetches *all* repo labels not just for an issue
-  const listLabelsOptions = await options.client.issues.listLabelsForRepo.endpoint.merge({
+  const listLabelsOptions = await options.client.rest.issues.listLabelsForRepo.endpoint.merge({
     owner: options.owner,
     repo: options.repo,
     per_page: 100

@@ -1,19 +1,28 @@
 name: Test
 
-on: [push, pull_request]
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     strategy:
       matrix:
-        node-version: [14.x, 15.x]
+        node-version: [lts/*, latest]
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Setup Node.js
-        uses: actions/setup-node@v2.1.2
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
       - run: npm ci
@@ -23,27 +32,29 @@ jobs:
   # whenever changes are made that effects the `dist/index.js` bundle.
   release:
     needs: tests
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    runs-on: ubuntu-slim
+    if: github.ref == 'refs/heads/main' && github.repository == 'nodejs/node-pr-labeler'
 
     env:
       TAG: v1
 
     steps:
-      - uses: actions/checkout@v2
-      - name: Setup Node.js
-        uses: actions/setup-node@v1
+      - uses: actions/checkout@v7
         with:
-          node-version: 14.x
+          persist-credentials: true
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
 
-      - name: npm install and build
-        run: |
-          npm ci
-          npm run build
+      - run: npm ci
+      - run: npm run build
 
       - name: Check if dist/ has changed after build
         id: changedTest
-        run: git diff --quiet HEAD -- dist/ || echo "::set-output name=hasChanged::true"
+        run: git diff --quiet HEAD -- dist/ || echo "hasChanged=true" >> "$GITHUB_OUTPUT"
 
       - name: Commit and update tag
         if: ${{ steps.changedTest.outputs.hasChanged == 'true' }}

@@ -2,12 +2,19 @@
 
 const tap = require('tap')
 const nock = require('nock')
-const github = require('@actions/github')
 
 const nodeRepo = require('../lib/node-repo')
-const client = github.getOctokit('phony-repo-token-for-tests')
 
 const readFixture = require('./read-fixture')
+
+let client
+async function getClient () {
+  client ??= (await import('@actions/github')).getOctokit('phony-repo-token-for-tests', {
+    // @actions/github uses undici's fetch with a custom dispatcher, which nock cannot intercept
+    request: { fetch: globalThis.fetch }
+  })
+  return client
+}
 
 tap.test('fetchExistingLabels(): yields an array of existing label names', async (t) => {
   const labelsFixture = readFixture('repo-labels.json')
@@ -21,6 +28,7 @@ tap.test('fetchExistingLabels(): yields an array of existing label names', async
 
   t.plan(1)
 
+  const client = await getClient()
   const existingLabels = await nodeRepo._fetchExistingLabels({ owner, repo, client })
   t.ok(existingLabels.includes('cluster'))
   scope.done()
@@ -47,6 +55,7 @@ tap.test('fetchExistingLabels(): can retrieve more than 100 labels', async (t) =
 
   t.plan(2)
 
+  const client = await getClient()
   const existingLabels = await nodeRepo._fetchExistingLabels({ owner, repo, client })
   t.ok(existingLabels.includes('cluster'))
   t.ok(existingLabels.includes('windows'))
