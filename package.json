@@ -9,7 +9,7 @@
   },
   "keywords": [],
   "engines": {
-    "node": ">= 24.21.0"
+    "node": "^24.21.0 || >= 26.10.0"
   },
   "private": true,
   "license": "MIT",
