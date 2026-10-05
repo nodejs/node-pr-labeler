@@ -9,7 +9,10 @@ const readFixture = require('./read-fixture')
 
 let client
 async function getClient () {
-  client ??= (await import('@actions/github')).getOctokit('phony-repo-token-for-tests')
+  client ??= (await import('@actions/github')).getOctokit('phony-repo-token-for-tests', {
+    // @actions/github uses undici's fetch with a custom dispatcher, which nock cannot intercept
+    request: { fetch: globalThis.fetch }
+  })
   return client
 }
 
