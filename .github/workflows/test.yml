@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     strategy:
       matrix:
@@ -34,7 +34,7 @@ jobs:
     needs: tests
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     if: github.ref == 'refs/heads/main' && github.repository == 'nodejs/node-pr-labeler'
 
     env:
