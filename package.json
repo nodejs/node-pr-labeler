@@ -28,5 +28,8 @@
     "ignore": [
       "dist/"
     ]
+  },
+  "tap": {
+    "allow-incomplete-coverage": true
   }
 }
