@@ -6,6 +6,12 @@ const path = require('path')
 const actualResolveLabels = require('../lib/resolve-labels')
 
 const config = fs.readFileSync(path.join(__dirname, '../.github/pr-labels.yml'), 'utf8')
-const defaultBaseBranch = 'master'
+const defaultBaseBranch = 'main'
 
-exports.resolveLabels = (filepathsChanged, baseBranch, limitLabels) => actualResolveLabels(filepathsChanged, baseBranch || defaultBaseBranch, config, limitLabels)
+exports.resolveLabels = (filepathsChanged, baseBranch, limitLabels) =>
+  actualResolveLabels(
+    filepathsChanged,
+    baseBranch || defaultBaseBranch,
+    config,
+    limitLabels
+  )
